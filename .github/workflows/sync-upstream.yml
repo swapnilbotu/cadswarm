@@ -1,0 +1,32 @@
+name: Sync CADSwarm Upstream
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/SachchitBalamurugan/cadswarm.git
+          git fetch upstream main --tags
+
+          git merge --no-edit upstream/main
+
+          git push origin main
+          git push origin --tags
