@@ -788,9 +788,15 @@ def _loopback_only_db_pid():
     return None
 
 
-def _restart_local_db(pid):
-    """Stop a loopback-only local database so the caller can start one bound to every interface. Its
-    databases live on disk, so they come back and everyone reconnects. Only ever a SpacetimeDB process."""
+def _db_data_dir(cmd):
+    """The data folder a SpacetimeDB server was started with, or "" for the default. `spacetime start`
+    hands the server its own default first, so the last `--data-dir` is the one in use."""
+    found = re.findall(r'--data-dir[= ](?:"([^"]+)"|(\S+))', cmd or "")
+    return (found[-1][0] or found[-1][1]) if found else ""
+
+
+def _stop_local_db(pid):
+    """Stop a loopback-only local database. Only ever a SpacetimeDB process."""
     if not is_our_process(pid, ("spacetime",)):
         return False
     _kill(pid)
@@ -808,18 +814,34 @@ def _restart_local_db(pid):
     return True
 
 
-def ensure_local_reachable(mode, log=None):
+def ensure_local_reachable(mode, data_dir, log=None):
     """A local team's database must be bound to every interface, or teammates on the network can't join.
     If this computer already has one bound to loopback only (from before that fix, or a manual
-    `spacetime start`), restart it now. Returns True when it was restarted."""
+    `spacetime start`), restart it now on every interface with the same data folder, so its databases
+    come back and every client reconnects. Returns the new server's PID, or None when nothing changed.
+
+    The new server serves whatever teams the old one did, so callers don't adopt it as theirs to stop."""
     if mode != "local" or not port_open(LOCAL_PORT):
-        return False
+        return None
     pid = _loopback_only_db_pid()
     if not pid:
-        return False
+        return None
+    st = spacetime_bin()
+    if not st:  # no way to start a replacement: leave the working (if unreachable) one alone
+        return None
+    stdb_data = _db_data_dir(_command_line(pid))
     if log:
         log("Making the team's database reachable from your network")
-    return _restart_local_db(pid)
+    if not _stop_local_db(pid):
+        return None
+    argv = [st, "start", "--listen-addr", f"0.0.0.0:{LOCAL_PORT}"]
+    if stdb_data:
+        argv += ["--data-dir", stdb_data]
+    lay = project_layout(data_dir)
+    os.makedirs(lay["internal"], exist_ok=True)
+    new = _spawn(argv, lay, "spacetime.log")
+    _wait_port(LOCAL_PORT, 30, new, data_dir)
+    return new
 
 
 def start_team(python, data_dir, mode="maincloud", db=None, web_url="", agent="claude", on_log=None):
@@ -847,7 +869,7 @@ def start_team(python, data_dir, mode="maincloud", db=None, web_url="", agent="c
             "uri": LOCAL_URI if mode == "local" else MAINCLOUD_URI}
     try:
         if mode == "local":
-            ensure_local_reachable(mode, log)  # replace a loopback-only database before using the port
+            ensure_local_reachable(mode, data_dir, log)  # rebind a loopback-only database before using the port
             if not port_open(LOCAL_PORT):
                 st = spacetime_bin()
                 if not st:

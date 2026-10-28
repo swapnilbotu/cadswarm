@@ -100,11 +100,19 @@ def open_document(path):
         doc = FreeCAD.newDocument("CadSwarm")
     doc.UndoMode = 1  # required: without it abortTransaction() silently keeps changes
     if doc.getObject(PARAMS) is None:
+        params_sheet()
+        doc.recompute()
+        save()
+
+
+def params_sheet():
+    """The shared Params sheet, made again if it is missing (a model from before delete refused it)."""
+    sheet = doc.getObject(PARAMS)
+    if sheet is None:
         sheet = doc.addObject("Spreadsheet::Sheet", PARAMS)
         sheet.set("A1", "name")
         sheet.set("B1", "value")
-        doc.recompute()
-        save()
+    return sheet
 
 
 SAVE_ATTEMPTS = 6
@@ -353,6 +361,11 @@ def op_set_placement(a):
 
 def op_delete(a):
     obj = get_obj(a.get("name"))
+    if obj.Name == PARAMS:
+        # Every part binds its sizes to it: a helper deleted it twice in one demo, and every set_param
+        # after that failed with not_found until the worker restarted.
+        raise OpError("not_allowed", "Params is the team's shared dimensions sheet and can't be deleted; "
+                                     "change a value with set_param instead")
     users = [o.Name for o in obj.InList]
     if users and not a.get("force"):
         raise OpError("in_use", f"{obj.Name} is used by {users}; delete those first or pass force")
@@ -371,7 +384,7 @@ def op_set_param(a):
     alias = str(a.get("alias", ""))
     if not alias.replace("_", "").isalnum() or alias[:1].isdigit():
         raise OpError("bad_args", "alias must be an identifier like hole_pitch")
-    sheet = get_obj(PARAMS)
+    sheet = params_sheet()
     row = find_param_row(sheet, alias)
     if row is None:
         rows = [int(c[1:]) for c in sheet.getUsedCells() if c[1:].isdigit()]

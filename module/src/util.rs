@@ -92,10 +92,17 @@ pub fn object_rev(ctx: &ReducerContext, ws: u64, name: &str) -> (u32, String) {
 }
 
 pub fn emit(ctx: &ReducerContext, ws: u64, kind: &str, actor: u64, data: Value) -> u64 {
-    ctx.db
+    let seq = ctx
+        .db
         .team_event()
         .insert(TeamEvent { seq: 0, ws, kind: kind.into(), actor, data_json: data.to_string(), at_ms: now_ms(ctx) })
-        .seq
+        .seq;
+    if ctx.db.event_head().ws().find(&ws).is_some() {
+        ctx.db.event_head().ws().update(EventHead { ws, seq });
+    } else {
+        ctx.db.event_head().insert(EventHead { ws, seq });
+    }
+    seq
 }
 
 pub fn system_message(ctx: &ReducerContext, ws: u64, to: &str, body: String, kind: &str, task_id: &str) {

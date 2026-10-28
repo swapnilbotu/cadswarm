@@ -73,8 +73,9 @@ To check without touching the repo, generate into a temporary folder and compare
 
 ## Step 4: Restart the team server (host) on the new build
 
-The host must run code that matches the module. The demo script rebuilds and restarts everything, reading
-API keys from `..\cadswarm.env` (next to the checkout, outside git):
+The host must run code that matches the module. The demo script rebuilds and restarts everything. It picks up
+an optional `cadswarm.env` (next to the checkout, outside git) when you keep demo-service keys there; without
+one it runs on the helpers' own CLI sign-ins:
 
 ```powershell
 powershell -File scripts\demo-down.ps1
@@ -82,7 +83,7 @@ powershell -File scripts\demo-up.ps1 -Db $db
 ```
 
 Or by hand: `cargo build --release --manifest-path host\Cargo.toml`, then
-`powershell -File scripts\with-env.ps1 host\target\release\cadswarm-host.exe --data <data folder> run`.
+`host\target\release\cadswarm-host.exe --data <data folder> run`.
 
 ## Step 5: Check it worked
 
@@ -112,7 +113,7 @@ Everything above can be tried on a throwaway local SpacetimeDB without touching 
 # terminal 2
 & $st publish --server local --module-path module --delete-data=always --yes=all cadswarm-e2e
 host\target\debug\cadswarm-host.exe --data $env:TEMP\cadswarm-e2e init --mode local --db cadswarm-e2e --python .venv\Scripts\python.exe
-powershell -File scripts\with-env.ps1 host\target\debug\cadswarm-host.exe --data $env:TEMP\cadswarm-e2e run
+host\target\debug\cadswarm-host.exe --data $env:TEMP\cadswarm-e2e run
 # terminal 3: the live tests (two agents coordinating, an op run by the host)
 $env:CADSWARM_LIVE = "1"; $env:CADSWARM_DB = "cadswarm-e2e"; .venv\Scripts\python.exe -m pytest tests/test_space_live.py -q
 ```
@@ -129,4 +130,4 @@ $env:CADSWARM_LIVE = "1"; $env:CADSWARM_DB = "cadswarm-e2e"; .venv\Scripts\pytho
 | Publish refused: a table can't be migrated | A schema change needs a manual migration; do not fall back to deleting data. Ask whoever changed `module/src/tables.rs`. |
 | The host crashes at start with a bindings or deserialization error | Bindings and module are out of step: step 3, then rebuild the host. |
 | Teammates don't see new buttons | They need the updated add-on (reinstall) and a FreeCAD restart. |
-| The host can't find the API keys | Put them in `..\cadswarm.env` (next to the checkout); `scripts\with-env.ps1` loads it. |
+| A helper stops at once with "Incorrect API key" | The CLI it runs was never signed in: open `claude`, `codex` or `opencode` once on the host's computer and sign in. No key or env file belongs in the repo. |

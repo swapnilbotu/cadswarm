@@ -22,6 +22,13 @@ pub fn v_workspace(ctx: &ViewContext) -> Vec<Workspace> {
     caller_ws(ctx).and_then(|ws| ctx.db.workspace().id().find(&ws)).into_iter().collect()
 }
 
+/// The caller's newest event seq: pollers read this one row and only read v_event when it moved.
+/// A team whose last event predates this module has no head row until its next event.
+#[view(accessor = v_event_head, public)]
+pub fn v_event_head(ctx: &ViewContext) -> Vec<EventHead> {
+    caller_ws(ctx).and_then(|ws| ctx.db.event_head().ws().find(&ws)).into_iter().collect()
+}
+
 macro_rules! ws_view {
     ($name:ident, $table:ident, $row:ty) => {
         #[view(accessor = $name, public)]

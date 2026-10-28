@@ -14,17 +14,22 @@ pub mod artifact_type;
 pub mod brief_type;
 pub mod cad_lock_type;
 pub mod cad_object_type;
+pub mod cancel_brief_reducer;
 pub mod cancel_handoff_reducer;
+pub mod cancel_task_reducer;
 pub mod claim_task_reducer;
 pub mod complete_op_reducer;
 pub mod component_preview_type;
 pub mod component_type;
 pub mod create_invite_reducer;
 pub mod create_task_reducer;
+pub mod delete_task_reducer;
+pub mod event_head_type;
 pub mod handoff_type;
 pub mod heartbeat_reducer;
 pub mod invite_type;
 pub mod leave_reducer;
+pub mod live_conn_type;
 pub mod lock_objects_reducer;
 pub mod log_activity_reducer;
 pub mod mark_delivered_reducer;
@@ -74,6 +79,7 @@ pub mod v_artifact_table;
 pub mod v_brief_table;
 pub mod v_component_preview_table;
 pub mod v_component_table;
+pub mod v_event_head_table;
 pub mod v_event_table;
 pub mod v_handoff_table;
 pub mod v_lock_table;
@@ -101,17 +107,22 @@ pub use artifact_type::Artifact;
 pub use brief_type::Brief;
 pub use cad_lock_type::CadLock;
 pub use cad_object_type::CadObject;
+pub use cancel_brief_reducer::cancel_brief;
 pub use cancel_handoff_reducer::cancel_handoff;
+pub use cancel_task_reducer::cancel_task;
 pub use claim_task_reducer::claim_task;
 pub use complete_op_reducer::complete_op;
 pub use component_preview_type::ComponentPreview;
 pub use component_type::Component;
 pub use create_invite_reducer::create_invite;
 pub use create_task_reducer::create_task;
+pub use delete_task_reducer::delete_task;
+pub use event_head_type::EventHead;
 pub use handoff_type::Handoff;
 pub use heartbeat_reducer::heartbeat;
 pub use invite_type::Invite;
 pub use leave_reducer::leave;
+pub use live_conn_type::LiveConn;
 pub use lock_objects_reducer::lock_objects;
 pub use log_activity_reducer::log_activity;
 pub use mark_delivered_reducer::mark_delivered;
@@ -161,6 +172,7 @@ pub use v_artifact_table::*;
 pub use v_brief_table::*;
 pub use v_component_preview_table::*;
 pub use v_component_table::*;
+pub use v_event_head_table::*;
 pub use v_event_table::*;
 pub use v_handoff_table::*;
 pub use v_lock_table::*;
@@ -196,9 +208,18 @@ pub enum Reducer {
         fence: u32,
         message_ids: Vec<String>,
     },
+    CancelBrief {
+        fence: u32,
+        brief_id: String,
+    },
     CancelHandoff {
         fence: u32,
         handoff_id: String,
+    },
+    CancelTask {
+        fence: u32,
+        task_id: String,
+        reason: String,
     },
     ClaimTask {
         fence: u32,
@@ -233,6 +254,10 @@ pub enum Reducer {
         objects: Vec<String>,
         assignee: String,
         brief: String,
+    },
+    DeleteTask {
+        fence: u32,
+        task_id: String,
     },
     Heartbeat {
         fence: u32,
@@ -417,11 +442,14 @@ impl __sdk::Reducer for Reducer {
         match self {
             Reducer::AcceptHandoff { .. } => "accept_handoff",
             Reducer::AckMessages { .. } => "ack_messages",
+            Reducer::CancelBrief { .. } => "cancel_brief",
             Reducer::CancelHandoff { .. } => "cancel_handoff",
+            Reducer::CancelTask { .. } => "cancel_task",
             Reducer::ClaimTask { .. } => "claim_task",
             Reducer::CompleteOp { .. } => "complete_op",
             Reducer::CreateInvite { .. } => "create_invite",
             Reducer::CreateTask { .. } => "create_task",
+            Reducer::DeleteTask { .. } => "delete_task",
             Reducer::Heartbeat { .. } => "heartbeat",
             Reducer::Leave { .. } => "leave",
             Reducer::LockObjects { .. } => "lock_objects",
@@ -472,12 +500,27 @@ impl __sdk::Reducer for Reducer {
                     message_ids: message_ids.clone(),
                 })
             }
+            Reducer::CancelBrief { fence, brief_id } => {
+                __sats::bsatn::to_vec(&cancel_brief_reducer::CancelBriefArgs {
+                    fence: fence.clone(),
+                    brief_id: brief_id.clone(),
+                })
+            }
             Reducer::CancelHandoff { fence, handoff_id } => {
                 __sats::bsatn::to_vec(&cancel_handoff_reducer::CancelHandoffArgs {
                     fence: fence.clone(),
                     handoff_id: handoff_id.clone(),
                 })
             }
+            Reducer::CancelTask {
+                fence,
+                task_id,
+                reason,
+            } => __sats::bsatn::to_vec(&cancel_task_reducer::CancelTaskArgs {
+                fence: fence.clone(),
+                task_id: task_id.clone(),
+                reason: reason.clone(),
+            }),
             Reducer::ClaimTask {
                 fence,
                 task_id,
@@ -542,6 +585,12 @@ impl __sdk::Reducer for Reducer {
                 assignee: assignee.clone(),
                 brief: brief.clone(),
             }),
+            Reducer::DeleteTask { fence, task_id } => {
+                __sats::bsatn::to_vec(&delete_task_reducer::DeleteTaskArgs {
+                    fence: fence.clone(),
+                    task_id: task_id.clone(),
+                })
+            }
             Reducer::Heartbeat { fence, status_text } => {
                 __sats::bsatn::to_vec(&heartbeat_reducer::HeartbeatArgs {
                     fence: fence.clone(),
@@ -854,6 +903,7 @@ pub struct DbUpdate {
     v_component: __sdk::TableUpdate<Component>,
     v_component_preview: __sdk::TableUpdate<ComponentPreview>,
     v_event: __sdk::TableUpdate<TeamEvent>,
+    v_event_head: __sdk::TableUpdate<EventHead>,
     v_handoff: __sdk::TableUpdate<Handoff>,
     v_lock: __sdk::TableUpdate<CadLock>,
     v_me: __sdk::TableUpdate<Member>,
@@ -899,6 +949,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "v_event" => db_update
                     .v_event
                     .append(v_event_table::parse_table_update(table_update)?),
+                "v_event_head" => db_update
+                    .v_event_head
+                    .append(v_event_head_table::parse_table_update(table_update)?),
                 "v_handoff" => db_update
                     .v_handoff
                     .append(v_handoff_table::parse_table_update(table_update)?),
@@ -984,6 +1037,8 @@ impl __sdk::DbUpdate for DbUpdate {
             &self.v_component_preview,
         );
         diff.v_event = cache.apply_diff_to_table::<TeamEvent>("v_event", &self.v_event);
+        diff.v_event_head =
+            cache.apply_diff_to_table::<EventHead>("v_event_head", &self.v_event_head);
         diff.v_handoff = cache.apply_diff_to_table::<Handoff>("v_handoff", &self.v_handoff);
         diff.v_lock = cache.apply_diff_to_table::<CadLock>("v_lock", &self.v_lock);
         diff.v_me = cache.apply_diff_to_table::<Member>("v_me", &self.v_me);
@@ -1028,6 +1083,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "v_event" => db_update
                     .v_event
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "v_event_head" => db_update
+                    .v_event_head
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "v_handoff" => db_update
                     .v_handoff
@@ -1111,6 +1169,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "v_event" => db_update
                     .v_event
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "v_event_head" => db_update
+                    .v_event_head
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "v_handoff" => db_update
                     .v_handoff
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -1181,6 +1242,7 @@ pub struct AppliedDiff<'r> {
     v_component: __sdk::TableAppliedDiff<'r, Component>,
     v_component_preview: __sdk::TableAppliedDiff<'r, ComponentPreview>,
     v_event: __sdk::TableAppliedDiff<'r, TeamEvent>,
+    v_event_head: __sdk::TableAppliedDiff<'r, EventHead>,
     v_handoff: __sdk::TableAppliedDiff<'r, Handoff>,
     v_lock: __sdk::TableAppliedDiff<'r, CadLock>,
     v_me: __sdk::TableAppliedDiff<'r, Member>,
@@ -1225,6 +1287,11 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
             event,
         );
         callbacks.invoke_table_row_callbacks::<TeamEvent>("v_event", &self.v_event, event);
+        callbacks.invoke_table_row_callbacks::<EventHead>(
+            "v_event_head",
+            &self.v_event_head,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<Handoff>("v_handoff", &self.v_handoff, event);
         callbacks.invoke_table_row_callbacks::<CadLock>("v_lock", &self.v_lock, event);
         callbacks.invoke_table_row_callbacks::<Member>("v_me", &self.v_me, event);
@@ -1912,6 +1979,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         v_component_table::register_table(client_cache);
         v_component_preview_table::register_table(client_cache);
         v_event_table::register_table(client_cache);
+        v_event_head_table::register_table(client_cache);
         v_handoff_table::register_table(client_cache);
         v_lock_table::register_table(client_cache);
         v_me_table::register_table(client_cache);
@@ -1937,6 +2005,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "v_component",
         "v_component_preview",
         "v_event",
+        "v_event_head",
         "v_handoff",
         "v_lock",
         "v_me",

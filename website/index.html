@@ -8,6 +8,7 @@
 <meta property="og:description" content="Design hardware as a team. Your team’s Claude Code and Codex build one live FreeCAD model together.">
 <meta name="theme-color" content="#0a0a0a">
 <title>CADSwarm</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=Geist+Mono:wght@400;500&display=swap">
@@ -149,6 +150,8 @@ figcaption strong { color: var(--text); font-weight: 500; }
   display: grid; place-items: center; padding: 24px;
 }
 .shot svg { width: 100%; height: 100%; }
+.shot-img { padding: 0; }
+.shot-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .shot svg text { font-family: var(--font-mono); }
 
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -341,28 +344,10 @@ footer { margin-top: clamp(72px, 9vw, 120px); border-top: 1px solid var(--line);
       </div>
       <div class="figs">
         <figure>
-          <div class="shot">
-            <svg viewBox="0 0 480 300" role="img" aria-label="Three parts in three owner colours appear in one model">
-              <g fill="none" stroke-width="1.6">
-                <path d="M70 200 240 250 410 200 240 150Z" stroke="#4c9be0"/>
-                <path d="M70 200v14l170 50 170-50v-14" stroke="#4c9be0" opacity=".6"/>
-                <g stroke="#f0913a">
-                  <path d="M128 196v-86M146 201v-86"/><ellipse cx="137" cy="110" rx="9" ry="4"/>
-                  <path d="M334 196v-86M352 191v-86"/><ellipse cx="343" cy="106" rx="9" ry="4"/>
-                </g>
-                <path d="M70 100 240 150 410 100 240 50Z" stroke="#4fb35a" stroke-dasharray="5 5"/>
-              </g>
-              <g font-size="12">
-                <rect x="20" y="20" width="130" height="24" rx="5" fill="#121212" stroke="rgba(244,243,241,.12)"/>
-                <circle cx="34" cy="32" r="4" fill="#4c9be0"/><text x="44" y="36" fill="#d4d2cd">lead-claude</text>
-                <rect x="170" y="20" width="130" height="24" rx="5" fill="#121212" stroke="rgba(244,243,241,.12)"/>
-                <circle cx="184" cy="32" r="4" fill="#f0913a"/><text x="194" y="36" fill="#d4d2cd">posts-codex</text>
-                <rect x="320" y="20" width="130" height="24" rx="5" fill="#121212" stroke="rgba(244,243,241,.12)"/>
-                <circle cx="334" cy="32" r="4" fill="#4fb35a"/><text x="344" y="36" fill="#d4d2cd">lid-claude</text>
-              </g>
-            </svg>
+          <div class="shot shot-img">
+            <img src="./web-view.png" width="1120" height="700" loading="lazy" decoding="async" alt="The CADSwarm web app mid-build: an ESP32 case in 3D with two agents' arrows labelled worker1, building WallS and worker2, building Standoff1, beside a chat sheet showing the request at the Build step, 3 of 5 parts done">
           </div>
-          <figcaption><strong>Live model.</strong> Every part shows up in your FreeCAD window the moment an agent builds it, coloured by who made it. Nobody passes files around.</figcaption>
+          <figcaption><strong>Live model.</strong> Every part shows up the moment an agent builds it, in FreeCAD and in the web app. Each agent's arrow shows what it's building, and the request tracks from plan to build to review. Nobody passes files around.</figcaption>
         </figure>
         <figure>
           <div class="shot">

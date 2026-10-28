@@ -53,6 +53,15 @@ pub struct HandoffRow {
     pub context_json: String,
 }
 
+/// One row of `v_member`: enough to find the agents this host started and retire them.
+#[derive(Debug, Clone)]
+pub struct MemberRow {
+    pub id: u64,
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+}
+
 pub struct Space {
     conn: DbConnection,
 }
@@ -76,6 +85,13 @@ const QUERIES: &[&str] = &[
 /// "taken_over": a newer process replaced this one, and fighting it would flap the team.
 pub fn should_rejoin(status: Option<&str>) -> bool {
     status == Some("left")
+}
+
+/// True when a reducer's answer says this host is no longer a member. The sweep can retire a host while
+/// its network is away; the subscription cache then never updates, so the host keeps working as a ghost
+/// (spawning agents that cannot join). The error a later call gets must be enough to rejoin.
+pub fn says_retired(message: &str) -> bool {
+    message.contains("left:") || message.contains("not_member:")
 }
 
 impl Space {
@@ -382,6 +398,24 @@ impl Space {
             .unwrap_or_else(|| ("?".into(), "agent".into()))
     }
 
+    /// Every member row, retired ones included: the host looks here for the agents it started so it can
+    /// take them off the team when they are finished with their job.
+    pub fn members(&self) -> Vec<MemberRow> {
+        self.conn
+            .db
+            .v_member()
+            .iter()
+            .map(|m| MemberRow { id: m.id, name: m.name, kind: m.kind, status: m.status })
+            .collect()
+    }
+
+    /// Take an agent off the team (host only, plus people): its locks are released and any task it still
+    /// holds goes back to the team, so a finished one-job agent leaves nothing behind.
+    pub fn revoke_member(&self, id: u64) -> Result<()> {
+        let fence = self.fence();
+        self.call("revoke_member", |cb| self.conn.reducers.revoke_member_then(fence, id, cb))
+    }
+
     /// Who last changed each of these objects, `{name: {id, name, kind}}`, so the style memory can tell a
     /// person correcting an agent's part from an agent tidying its own.
     pub fn last_actors(&self, names: &[String]) -> serde_json::Value {
@@ -417,7 +451,7 @@ impl Space {
 
 #[cfg(test)]
 mod rejoin_tests {
-    use super::should_rejoin;
+    use super::{says_retired, should_rejoin};
 
     #[test]
     fn only_a_retired_host_rejoins_by_itself() {
@@ -426,5 +460,15 @@ mod rejoin_tests {
         assert!(!should_rejoin(Some("active")));
         assert!(!should_rejoin(Some("stale")));
         assert!(!should_rejoin(None));
+    }
+
+    #[test]
+    fn a_retirement_is_recognised_from_the_answers_a_host_gets() {
+        // After the network returns, the first reducer answers with one of these instead of a timeout.
+        assert!(says_retired("heartbeat: left: This participant left the session; call rejoin"));
+        assert!(says_retired("heartbeat: not_member: join with an invite first"));
+        // A network that is still away, or any other refusal, is not a retirement.
+        assert!(!says_retired("heartbeat: no answer from SpacetimeDB within 30s"));
+        assert!(!says_retired("heartbeat: fence_stale: This process was superseded"));
     }
 }

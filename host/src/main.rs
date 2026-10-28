@@ -151,14 +151,20 @@ fn run(cfg: &HostConfig) -> Result<()> {
     // When the sweep retires this host (its laptop slept past the orphan window), every reducer
     // call fails with `left:` until it rejoins; retry at most every 10s.
     let mut last_revive: Option<std::time::Instant> = None;
+    // Set when a reducer says the host is no longer a member: the subscription cache can stay silent
+    // about that (it went quiet with the network), so the answer itself has to trigger the rejoin.
+    let mut retired = false;
     // Heartbeat like every other member, well inside the module's 30s stale window.
     let mut last_beat: Option<std::time::Instant> = None;
     loop {
-        if space.retired() {
+        if retired || space.retired() {
             if last_revive.map_or(true, |t| t.elapsed() >= Duration::from_secs(10)) {
                 last_revive = Some(std::time::Instant::now());
                 match space.revive() {
-                    Ok(()) => println!("[host] rejoined after being retired (fence {})", space.fence()),
+                    Ok(()) => {
+                        retired = false;
+                        println!("[host] rejoined after being retired (fence {})", space.fence());
+                    }
                     Err(e) => eprintln!("[host] rejoin failed: {e:#}"),
                 }
             }
@@ -168,7 +174,9 @@ fn run(cfg: &HostConfig) -> Result<()> {
         if last_beat.map_or(true, |t| t.elapsed() >= Duration::from_secs(10)) {
             last_beat = Some(std::time::Instant::now());
             if let Err(e) = space.heartbeat() {
-                eprintln!("[host] heartbeat failed: {e:#}");
+                let msg = format!("{e:#}");
+                eprintln!("[host] heartbeat failed: {msg}");
+                retired = space::says_retired(&msg);
             }
         }
         if let Some(op) = space.queued_ops().into_iter().find(|o| !tried.contains(&o.id)) {

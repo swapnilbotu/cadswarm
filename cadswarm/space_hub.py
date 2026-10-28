@@ -110,6 +110,7 @@ class SpaceHub(LibraryRoutes):
         self.hub = cfg.get("uri", "")
         self.space = space or SpaceClient(cfg["uri"], cfg["db"], self.identity.get("token"), timeout)
         self._seq = 0
+        self._has_head = True  # False once the team's module turns out to predate v_event_head
         self._cache = None  # view rows shared by one snapshot(); None = always read fresh
         self.routes = [
             ("POST", r"/heartbeat", self.heartbeat), ("POST", r"/leave", self.leave),
@@ -338,7 +339,26 @@ class SpaceHub(LibraryRoutes):
     def _my_locks(self):
         return sorted(l["object"] for l in self._rows("v_lock") if l["holder"] == self.me_id)
 
+    def _head_seq(self):
+        """The team's newest event seq from v_event_head (one row), or None when only v_event can say: a
+        module older than that view, or a team with no event since the update. A view runs over all its rows
+        before WHERE applies, so asking v_event "anything newer?" re-read the whole history on every poll."""
+        if not self._has_head:
+            return None
+        try:
+            rows = self._rows("v_event_head")
+        except HubRequestError as e:
+            if "v_event_head" not in str(e.body.get("error", "")):
+                raise
+            self._has_head = False
+            return None
+        return rows[0]["seq"] if rows else None
+
     def latest_seq(self):
+        head = self._head_seq()
+        if head is not None:
+            self._seq = max(self._seq, head)
+            return self._seq
         rows = self._rows("v_event", f"seq > {int(self._seq)}")
         if rows:
             self._seq = max(r["seq"] for r in rows)
@@ -811,6 +831,9 @@ class SpaceHub(LibraryRoutes):
     # ------------------------------------------------------------------- events
 
     def _event_rows(self, since):
+        head = self._head_seq()
+        if head is not None and head <= int(since):
+            return []
         rows = sorted(self._rows("v_event", f"seq > {int(since)}"), key=lambda e: e["seq"])
         return [{**_json(e["data_json"], {}), "seq": e["seq"], "ts": e["at_ms"] / 1000, "kind": e["kind"],
                  "actor": e["actor"]} for e in rows]

@@ -28,6 +28,40 @@ def test_real_freecad_panel_layout_and_chat(tmp_path):
                               "back_down": True}, r["chat_jump"]
     assert r["toast"] == "✓  Created task “Lid”"  # confirmations reach people who never open the console
     assert "teammate's computer" in r["away_tip"]
+    # Opening the workbench keeps FreeCAD answering: the rejoin happens in the background, the panel
+    # says "Joining…", and the team comes up (with its parts) once the slow team has answered.
+    assert r["startup"] == {"returned_fast": True, "seconds_blocked": r["startup"]["seconds_blocked"],
+                            "state_while_joining": "connecting", "connected": True, "parts": 1,
+                            "workers_started": True, "joining_flag_cleared": True}, r["startup"]
+    assert r["startup"]["seconds_blocked"] < 0.3, r["startup"]
+    # Picking a previous project: a real picture when the panel has one, initials when it hasn't, and
+    # the facts that tell projects apart ("118 parts · on this computer · seen 1 hour ago").
+    proj = r["projects"]
+    assert proj["cards"] == {"count": 2, "wrote_picture": True, "picture_shown": True, "picture_fits": True,
+                             "placeholder_for_missing": True, "subtitle": proj["cards"]["subtitle"],
+                             "first_selected": True, "hosted_badge": True, "no_badge_for_shared": True}, proj["cards"]
+    assert proj["cards"]["subtitle"].startswith("118 parts \u00b7 on this computer \u00b7 seen "), proj["cards"]["subtitle"]
+    assert proj["picking"] == {"team": "team-b", "enabled": True, "single_team_no_dialog": True,
+                               "no_teams": True}, proj["picking"]
+    assert proj["cards"]["hosted_badge"] is True, proj["cards"]
+    # The card picture is the model's own edges in an isometric view: two boxes = 96 line pieces
+    # (12 edges, 4 pieces each), a hidden part and an empty shape are skipped, and the projection
+    # really is 30 degrees.
+    assert proj["outline"] == {"parts": 2, "segments": 96, "flat_is_2d": True,
+                               "projected": [[8.66, 5.0]]}, proj["outline"]
+    # Opening FreeCAD with a team this computer hosts and its server stopped: the server is started and
+    # joined without the setup guide, and the banner says what it is doing.
+    auto = proj["auto_start"]
+    assert auto["started"] == [["C:/p/rocket", "local", "team-a"]] and auto["connected"] is True, auto
+    assert auto["told_the_person"][0].startswith("Starting your team"), auto["told_the_person"]
+    assert any(t.startswith("Joining your team") for t in auto["told_the_person"]), auto["told_the_person"]
+    # Nothing answering: three tries, a banner that says so with Try again, and one click gets in.
+    retry = proj["retry"]
+    assert retry["state"] == "disconnected" and retry["error_kept"] is True, retry
+    assert retry["button"] == "Try again", retry
+    assert "Couldn't reach your team just now." in retry["headline"], retry
+    assert retry["tries"] == 4, retry  # the auto-start join + the 3 tries of the failing one
+    assert retry["after_retry"] == "connected" and retry["button_after"] == "Leave", retry
     # The panes the site shows are real tabs: shared sizes, the project folder with history, refusals as cards.
     assert [t.split(" ")[0] for t in r["tabs"]] == ["Team", "Tasks", "Activity", "Sizes", "Files", "Library",
                                                      "Remote", "Tools"], r["tabs"]

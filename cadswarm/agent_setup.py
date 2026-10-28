@@ -19,6 +19,10 @@ from .paths import LAUNCHER
 
 BEGIN, END = "<!-- cadswarm:begin -->", "<!-- cadswarm:end -->"
 TOML_BEGIN, TOML_END = "# >>> cadswarm (managed by `cadswarm setup`)", "# <<< cadswarm"
+# Codex asks before every MCP tool call unless the server's config says otherwise, and a background run
+# (`codex exec`) has nobody to answer, so the call is refused outright. `approve` covers the cadswarm
+# server only: Codex's own sandbox and the person's other MCP servers keep their settings.
+CODEX_APPROVAL_KEY = "default_tools_approval_mode"
 
 CLIENTS = {
     "claude": {"label": "Claude Code", "exe": "claude",
@@ -38,6 +42,9 @@ AGENT_DOC = """{begin}
 Your teammates' AI helpers are editing the same live model right now.
 All CAD work goes through the `cadswarm` MCP tools: never edit .FCStd files directly.
 Your human may be new to CAD: keep dimensions in mm and use plain words.
+If the `cadswarm` tools aren't there yet, they are still starting: wait about 5 seconds and look again
+(for up to a minute). Never start the CADSwarm server yourself and never read CADSwarm's code or config
+to find them: a second copy takes your seat on the team and can drop you from it.
 
 **Be brief.** People watch the model change live, so don't narrate: no running commentary, no restating tool
 calls or their results, no plans-before-acting. Reply in one or two short sentences; when you finish, say what
@@ -201,6 +208,10 @@ def setup_codex(project, python):
         f"command = {toml_string(python)}",
         f"args = [{toml_string(LAUNCHER)}, 'mcp']",
         f"env = {{ CADSWARM_PROJECT = {toml_string(project)} }}",
+        # A background run (`codex exec`, how the runner wakes a helper) has nobody to answer Codex's
+        # approval prompt, so every CADSwarm call failed with "MCP tool call requires approval, but
+        # approval policy is never" and the helper looked stuck on a message it could not touch.
+        f"{CODEX_APPROVAL_KEY} = 'approve'",
         "tool_timeout_sec = 300  # FEA waits ~75 s and a heavy part script can take minutes; 120 s cut them off",
         "",
         "# UserPromptSubmit injects team context (who holds which parts, what changed) before each prompt.",
@@ -212,6 +223,32 @@ def setup_codex(project, python):
         f.write((text.rstrip() + "\n\n" if text.strip() else "") + block)
     upsert_block(os.path.join(project, "AGENTS.md"), AGENT_DOC.format(begin=BEGIN, end=END))
     return [path, os.path.join(project, "AGENTS.md")]
+
+
+def ensure_codex_approval(project):
+    """Give an existing helper folder the MCP approval that setup_codex now writes, so a helper set up by
+    an older CADSwarm can use the cadswarm tools again (the runner calls this before a wake). Returns True
+    when the file changed. Only the cadswarm table is touched, right under its header: comments, other
+    servers and Codex's own settings stay exactly as they are."""
+    path = os.path.join(project, ".codex", "config.toml")
+    try:
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+    except OSError:
+        return False
+    lines = text.splitlines()
+    header = next((i for i, line in enumerate(lines) if line.strip() == "[mcp_servers.cadswarm]"), None)
+    if header is None:
+        return False
+    end = next((i for i in range(header + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    if any(line.split("=", 1)[0].strip() == CODEX_APPROVAL_KEY for line in lines[header + 1:end]):
+        return False
+    indent = lines[header][:len(lines[header]) - len(lines[header].lstrip())]
+    lines.insert(header + 1, f"{indent}{CODEX_APPROVAL_KEY} = 'approve'")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(newline.join(lines) + (newline if text.endswith(("\n", "\r")) else ""))
+    return True
 
 
 def codex_home():

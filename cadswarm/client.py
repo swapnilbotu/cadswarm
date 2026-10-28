@@ -10,6 +10,7 @@ which makes any older process using that identity unable to act.
 """
 import json
 import os
+import time
 
 
 class HubRequestError(Exception):
@@ -37,11 +38,28 @@ def load_json(path, default=None):
 
 
 def save_json(path, value):
+    """Write JSON so a reader never sees half a file. The temp name is unique per call: two processes
+    writing the same file (a runner restart racing the previous one) used to share `<path>.tmp`, and the
+    loser died on a Windows PermissionError while the winner's `os.replace` met an open temp file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(value, f, indent=2)
-    os.replace(tmp, path)
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(value, f, indent=2)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)  # a reader (or a virus scanner) has it open for a moment
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def find_project_dir(start):

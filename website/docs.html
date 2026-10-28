@@ -440,6 +440,11 @@ AI helpers (Claude, Codex, …)  ─┘     tasks · chat · briefs · stale swe
         <p>A failed start is retried a few times with a growing pause, then the brief fails with the tail of the agent's
           log in the panel — instead of retrying forever. If the reviewer finds something, the owners are woken to fix it
           and the reviewer runs again.</p>
+        <p>Planners, workers and the reviewer are one-job helpers: each leaves the team as soon as its run ends, so a
+          finished or failed request does not leave a row of idle "workers" behind. When the request is over the host
+          also removes the folder each start used under <code>agents\</code>. A worker that stopped with its task still
+          open gives it back, and one whose MCP server went quiet is taken off the team too, so a task never waits as
+          "needs someone" — a fresh worker picks it up.</p>
 
         <h3>Asking well</h3>
         <ul>
@@ -1069,8 +1074,9 @@ AI helpers (Claude, Codex, …)  ─┘     tasks · chat · briefs · stale swe
             </tbody>
           </table>
         </div>
-        <p>Developer-only variables and the full list are in <a href="developer.html">Developers</a> and the
-          repository's <code>.env.example</code>.</p>
+        <p>Nothing here is required, and there is no key to paste: your AI helper uses the sign-in its own CLI
+          already has on this computer, and SpacetimeDB uses its own login. Developer-only variables are in
+          <a href="developer.html">Developers</a>.</p>
       </section>
 
       <div class="pager">

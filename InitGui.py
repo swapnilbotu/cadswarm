@@ -1,6 +1,28 @@
 # FreeCAD runs this when it starts. This folder (the CADSwarm add-on) is on sys.path,
 # so the `cadswarm` package beside this file is importable.
 import FreeCADGui as Gui
+from PySide import QtCore
+
+
+def open_on_start():
+    """Open the team panel on every launch, not only when someone picks the CADSwarm workbench.
+
+    Starting FreeCAD plainly (its Start page, or a model opened from Explorer) never runs the
+    workbench's Activated(), so the panel — and with it the join — only came up if you found
+    CADSwarm in the workbench list. That is what "sometimes it doesn't connect" looked like. The
+    panel rejoins the team by itself (panel.try_auto_rejoin), so this is the whole of "start CADSwarm".
+    """
+    try:
+        from cadswarm.gui import panel
+        if panel.SESSION.panel is None:
+            panel.show_panel()
+        panel.SESSION.try_auto_rejoin()
+    except Exception as e:  # noqa: BLE001 - never break FreeCAD's startup over this
+        import FreeCAD
+        FreeCAD.Console.PrintWarning(f"[CADSwarm] could not open the team panel: {e}\n")
+
+
+QtCore.QTimer.singleShot(2000, open_on_start)
 
 
 class CadSwarmWorkbench(Gui.Workbench):

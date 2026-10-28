@@ -378,7 +378,9 @@ class SetupWizard(QtGui.QDialog):
             lay.addWidget(label("Open a project you've worked on before", "hint"))
             for t in teams[:5]:
                 open_btn = QtGui.QCommandLinkButton(f"Open “{t['project']}”",
-                                                    "Reopen this team's project where you left off.")
+                                                    panel.project_cards.subtitle(t))
+                open_btn.setIcon(panel.projects_ui.icon_for(t, 34))
+                open_btn.setIconSize(QtCore.QSize(34, 34))
                 open_btn.clicked.connect(lambda _c=False, t=t: self.open_team(t))
                 lay.addWidget(open_btn)
             lay.addSpacing(10)
@@ -996,7 +998,7 @@ class SetupWizard(QtGui.QDialog):
             # Never adopt whatever listens on the local port for stopping: "Stop hosting" must only stop
             # what we started. But a local database bound only to this computer serves no teammate, so
             # rebind it now (only a SpacetimeDB process on our own port is touched; the host reconnects).
-            hosting.ensure_local_reachable(mode, log)
+            hosting.ensure_local_reachable(mode, data_dir, log)
             return
         log("Starting your team's server")
         info = hosting.start_team(self.python, data_dir, mode, db, on_log=log)

@@ -189,18 +189,28 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path module\Car
 cargo build --release --target wasm32-unknown-unknown --manifest-path module\Cargo.toml</pre>
         </div>
 
-        <p>Optional services read keys from the environment, never from the repo. Copy <code>.env.example</code> to
-          <code>cadswarm.env</code> next to the checkout (shared by every worktree) or to a git-ignored <code>.env</code>,
-          and run commands through the loader so the variables apply to that process only:</p>
+        <p>Nothing here needs keys or a config file. The AI helpers run on the sign-in of whichever CLI
+          you already use (<code>claude</code>, <code>codex</code> or <code>opencode</code>), the host starts them the
+          same way, and SpacetimeDB publishing and hosting use the CLI's stored login (<code>spacetime login</code>).
+          Tests and the host run as they are:</p>
         <div class="code">
-          <div class="code-bar"><span>With environment</span>
-            <button class="copy" type="button" data-copy="powershell -File scripts\with-env.ps1 python -m pytest -q
-powershell -File scripts\with-env.ps1 host\target\release\cadswarm-host.exe --data .\team run">Copy</button></div>
-          <pre>powershell -File scripts\with-env.ps1 python -m pytest -q
-powershell -File scripts\with-env.ps1 host\target\release\cadswarm-host.exe --data .\team run</pre>
+          <div class="code-bar"><span>Run tests and the host</span>
+            <button class="copy" type="button" data-copy=".venv\Scripts\python -m pytest -q
+host\target\release\cadswarm-host.exe --data .\team run">Copy</button></div>
+          <pre>.venv\Scripts\python -m pytest -q
+host\target\release\cadswarm-host.exe --data .\team run</pre>
         </div>
-        <p><code>-EnvFile &lt;path&gt;</code> or <code>CADSWARM_ENV_FILE</code> picks a specific file. SpacetimeDB publishing
-          uses the CLI's stored login (<code>spacetime login</code>), not an environment variable.</p>
+        <p>Only the optional demo services (Elastic recall, Creao, Factory) and a machine that cannot sign in
+          interactively need variables. Set them in your shell, or write them to a git-ignored
+          <code>cadswarm.env</code> next to the checkout and let the loader set them for one command &mdash; it never
+          requires the file:</p>
+        <div class="code">
+          <div class="code-bar"><span>Optional settings</span>
+            <button class="copy" type="button" data-copy="powershell -File scripts\with-env.ps1 .venv\Scripts\python -m pytest -q">Copy</button></div>
+          <pre>powershell -File scripts\with-env.ps1 .venv\Scripts\python -m pytest -q</pre>
+        </div>
+        <p><code>.env.example</code> lists the extras and the developer overrides; <code>-EnvFile &lt;path&gt;</code> or
+          <code>CADSWARM_ENV_FILE</code> picks a specific file.</p>
 
         <div class="code">
           <div class="code-bar"><span>Run a whole team from a terminal</span>

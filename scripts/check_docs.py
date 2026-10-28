@@ -58,7 +58,10 @@ def main():
             target, _, frag = href.partition("#")
             if not target:
                 continue
-            target_path = os.path.normpath(os.path.join(os.path.dirname(os.path.join(ROOT, page)), target))
+            # "/favicon.svg" is site-root-relative: the site is served from website/, so that is
+            # website/favicon.svg. A plain join would resolve it against the drive root.
+            base = ROOT if target.startswith("/") else os.path.dirname(os.path.join(ROOT, page))
+            target_path = os.path.normpath(os.path.join(base, target.lstrip("/")))
             if not os.path.exists(target_path):
                 problems.append(f"{page}: {href} -> missing file")
                 continue

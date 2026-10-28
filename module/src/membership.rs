@@ -45,18 +45,34 @@ fn new_member(ws: u64, identity: Identity, name: &str, kind: &str, client: &str,
     }
 }
 
+/// How old `last_seen_ms` may get before a connect or disconnect refreshes it. Heartbeats (every 15 s)
+/// keep a working helper fresher than this, so its HTTP requests never write `member` at all.
+const SEEN_REFRESH_MS: u64 = 20_000;
+
+/// Every HTTP /call and /sql is a connect and a disconnect, several a second across a team. Presence goes
+/// to `live_conn`, which no view reads; `member` (which every view reads) is only written when something a
+/// person could see changes: a quiet member is back, or its last sign of life is getting old.
 #[reducer(client_connected)]
 pub fn on_connect(ctx: &ReducerContext) {
+    if let Some(conn) = ctx.connection_id() {
+        if ctx.db.live_conn().conn().find(&conn).is_none() {
+            ctx.db.live_conn().insert(LiveConn { conn, identity: ctx.sender() });
+        }
+    }
     if let Some(m) = latest_member(ctx, ctx.sender()) {
         if m.status == "removed" {
             return; // a person took this helper off the team; it stays off until invited again
         }
+        let now = now_ms(ctx);
         // Reconnecting is a sign of life: a quiet (stale) member is active again. Members who left
         // or were taken over stay retired; they must rejoin.
         let revived = m.status == "stale";
+        if !revived && now.saturating_sub(m.last_seen_ms) < SEEN_REFRESH_MS {
+            return;
+        }
         let (status, stale_since_ms) = if revived { ("active".to_string(), 0) } else { (m.status.clone(), m.stale_since_ms) };
         let (ws, id, name) = (m.ws, m.id, m.name.clone());
-        ctx.db.member().id().update(Member { online: true, last_seen_ms: now_ms(ctx), status, stale_since_ms, ..m });
+        ctx.db.member().id().update(Member { last_seen_ms: now, status, stale_since_ms, ..m });
         // As heartbeat does: give back the tasks the sweep set aside (it will never see "stale" now).
         if revived {
             resume_tasks(ctx, id);
@@ -67,12 +83,26 @@ pub fn on_connect(ctx: &ReducerContext) {
 
 #[reducer(client_disconnected)]
 pub fn on_disconnect(ctx: &ReducerContext) {
+    if let Some(conn) = ctx.connection_id() {
+        ctx.db.live_conn().conn().delete(&conn);
+    }
     if let Some(m) = latest_member(ctx, ctx.sender()) {
         // The pointer is left as it is: every HTTP /call and /sql is a connect and a disconnect,
         // so resting it here would erase an agent's pointer the moment its request ends. Going
         // stale (sweep) and leaving rest it instead.
-        ctx.db.member().id().update(Member { online: false, last_seen_ms: now_ms(ctx), ..m });
+        // `online` on the row is only set by modules older than live_conn: clear it once, so a WebSocket
+        // that outlived the update is counted until it closes and never after.
+        let now = now_ms(ctx);
+        if m.online || now.saturating_sub(m.last_seen_ms) >= SEEN_REFRESH_MS {
+            ctx.db.member().id().update(Member { online: false, last_seen_ms: now, ..m });
+        }
     }
+}
+
+/// True while this identity holds an open connection (live_conn), or a WebSocket opened before this
+/// module recorded connections there.
+pub fn is_online(ctx: &ReducerContext, m: &Member) -> bool {
+    m.online || ctx.db.live_conn().identity().filter(&m.identity).next().is_some()
 }
 
 #[reducer]

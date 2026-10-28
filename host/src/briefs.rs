@@ -6,7 +6,7 @@ use crate::config::HostConfig;
 use crate::space::Space;
 use crate::worker::WorkerDriver;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,8 @@ const SPAWN_BACKOFF: [Duration; 3] = [Duration::from_secs(2), Duration::from_sec
 
 pub const MAX_WORKERS: usize = 3;
 pub const MAX_REVIEW_ROUNDS: u32 = 3;
+/// How often the host clears one-job agents whose MCP server is gone (see `sweep_stale_agents`).
+const ORPHAN_SWEEP: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default)]
 pub struct BriefState {
@@ -91,6 +93,10 @@ pub fn next_action(s: &BriefState) -> Action {
                 Action::Wait
             }
         }
+        // No live worker but open work: start a generation for it. A task whose helper went quiet is
+        // `awaiting_takeover` for a few seconds until the host's sweep takes that member off the team
+        // (which hands the task back), so it becomes `open` here rather than spawning a worker that
+        // would find nothing to claim.
         "building" if s.open > 0 && s.workers_alive == 0 => Action::Build(s.open.min(MAX_WORKERS)),
         "reviewing" if s.reviewer_alive || s.exporting => Action::Wait,
         // No reviewer of ours is running this round: a host restarted, or the only verdict is from a
@@ -156,6 +162,43 @@ fn board_library_candidates(cfg: &HostConfig) -> Vec<PathBuf> {
     out
 }
 
+/// The suffix a brief's one-job agents carry in their name (`b_f413f129` -> `f413f129`).
+pub fn brief_suffix(brief_id: &str) -> &str {
+    brief_id.strip_prefix("b_").unwrap_or(brief_id)
+}
+
+/// True for the agents the host starts for one brief: `planner-<suffix>`, `workerN-<suffix>`,
+/// `reviewer-<suffix>`. They are one-job identities, not teammates: when the brief is over nobody
+/// should see them sitting in the team list with nothing to do.
+pub fn is_brief_agent(name: &str, brief_id: &str) -> bool {
+    let Some((role, tail)) = name.rsplit_once('-') else { return false };
+    if !tail.eq_ignore_ascii_case(brief_suffix(brief_id)) {
+        return false;
+    }
+    let role = role.to_ascii_lowercase();
+    role == "planner"
+        || role == "reviewer"
+        || role.strip_prefix("worker").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True for any one-job agent name (`planner-…`, `worker3-…`, `reviewer-…`, `handoff-…`), with no brief
+/// at hand: a host that stopped mid-brief leaves these behind as live rows that no longer have a process.
+pub fn is_one_job_agent(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name.starts_with("planner-") || name.starts_with("reviewer-") || name.starts_with("handoff-") {
+        return true;
+    }
+    name.strip_prefix("worker").and_then(|rest| rest.split_once('-')).is_some_and(
+        |(n, tail)| !tail.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()),
+    )
+}
+
+/// A member row that no agent can act through any more: its MCP server is gone (stale), or the member
+/// left / was taken over / removed. `""` means the row is not there yet (a start in progress).
+fn unusable_member(status: &str) -> bool {
+    !(status.is_empty() || status == "active")
+}
+
 #[derive(Default)]
 struct Runtime {
     seed_ops: Vec<String>,
@@ -209,6 +252,11 @@ pub struct Orchestrator {
     handoff_failed: HashMap<String, Instant>,
     /// When host.json was last re-read, so a person's new AI-helper choice takes effect without a restart.
     agent_checked: Instant,
+    /// Briefs whose finished agents this host has already cleared away (once per host run).
+    cleaned: HashSet<String>,
+    /// When the stale one-job agents were last taken off the team (None: on the first tick, so a host
+    /// that was restarted mid-brief recovers their work).
+    last_sweep: Option<Instant>,
 }
 
 /// How long to wait before starting another agent for a brief after `failures` failed starts.
@@ -333,7 +381,98 @@ impl Orchestrator {
             });
         // The reviewer is an ordinary agent started with the host's own CLI, so every brief is reviewed.
         Orchestrator { cfg, boards, runs: HashMap::new(), handoffs: HashMap::new(), handoff_failed: HashMap::new(),
-                       agent_checked: Instant::now() }
+                       agent_checked: Instant::now(), cleaned: HashSet::new(), last_sweep: None }
+    }
+
+    /// The status of the newest member row with this name ("" when there is none).
+    fn member_status(space: &Space, name: &str) -> String {
+        space.members().into_iter()
+            .filter(|m| m.name.eq_ignore_ascii_case(name))
+            .max_by_key(|m| m.id)
+            .map(|m| m.status)
+            .unwrap_or_default()
+    }
+
+    /// True when this agent is done with the brief: its CLI exited, or its MCP server went quiet and the
+    /// member is stale, so no tool call it makes can reach the team. A CLI still running without its MCP
+    /// server is stopped here instead of holding a task nobody can finish (that task then goes back to
+    /// the team and a fresh worker picks it up).
+    fn finished(space: &Space, a: &mut Agent) -> bool {
+        if !a.alive() {
+            return true;
+        }
+        if !unusable_member(&Self::member_status(space, &a.name)) {
+            return false;
+        }
+        a.kill();
+        true
+    }
+
+    /// Take one finished agent off the team: it is a one-job identity, so once its CLI has exited it must
+    /// not sit in the team list with no task. Leaving its claimed work behind would strand it, so the
+    /// module hands that back to the team (`revoke_member`). Its sign-in is cleared too, so the next start
+    /// (a planner retry, the next review round) joins with its fresh invite instead of a retired identity.
+    fn retire_agent(cfg: &HostConfig, space: &Space, name: &str) {
+        for m in space.members() {
+            let live = m.status == "active" || m.status == "stale";
+            if !live || m.kind == "host" || m.kind == "human" || !m.name.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            match space.revoke_member(m.id) {
+                Ok(()) => eprintln!("[host] {name} finished its job; taken off the team"),
+                Err(e) => eprintln!("[host] could not take {name} off the team: {e}"),
+            }
+        }
+        crate::agents::forget_identity(cfg, name);
+    }
+
+    /// The agents one brief started: from its member rows and from the folders left by earlier hosts
+    /// (a restart loses the runtimes, not the leftovers).
+    fn brief_agents(cfg: &HostConfig, space: &Space, brief_id: &str) -> Vec<String> {
+        let mut names: Vec<String> = crate::agents::run_dirs(cfg).into_iter()
+            .filter(|n| is_brief_agent(n, brief_id))
+            .collect();
+        names.extend(space.members().into_iter().map(|m| m.name).filter(|n| is_brief_agent(n, brief_id)));
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// A brief is over: stop whatever is still running for it, take its agents off the team and delete the
+    /// folders of every start. A finished brief used to leave a dozen "workers" in the team list and one
+    /// log folder per start on disk.
+    fn finish(&mut self, space: &Space, b: &crate::space::BriefRow) {
+        let mut names: HashSet<String> = Self::brief_agents(&self.cfg, space, &b.id).into_iter().collect();
+        if let Some(mut rt) = self.runs.remove(&b.id) {
+            let agents: Vec<Agent> = rt.planner.take().into_iter()
+                .chain(rt.workers.drain(..))
+                .chain(rt.reviewer.take())
+                .collect();
+            for mut a in agents {
+                a.kill();
+                names.insert(a.name);
+            }
+        }
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        for name in names {
+            Self::retire_agent(&self.cfg, space, &name);
+            crate::agents::remove_run_dir(&self.cfg, &name);
+        }
+    }
+
+    /// A one-job agent whose member has gone quiet (its MCP server is gone) is not a teammate: take it
+    /// off the team, which also hands its task back so a fresh worker can finish it. Checked every few
+    /// seconds so a host that was closed mid-brief recovers the work within half a minute of restarting.
+    fn sweep_stale_agents(cfg: &HostConfig, space: &Space) {
+        let stale: Vec<String> = space.members().into_iter()
+            .filter(|m| m.status == "stale" && m.kind != "host" && m.kind != "human")
+            .map(|m| m.name)
+            .filter(|n| is_one_job_agent(n))
+            .collect();
+        for name in stale {
+            Self::retire_agent(cfg, space, &name);
+        }
     }
 
     /// A person can pick their AI helper in the guide after the host started: re-read host.json every
@@ -392,6 +531,12 @@ impl Orchestrator {
 
     pub fn tick(&mut self, space: &Space, mut helper: Option<&mut WorkerDriver>) {
         self.refresh_agent();
+        // A one-job agent whose MCP server is gone can never finish its task; take it off the team, which
+        // hands the task back. This is also how a host that was restarted mid-brief recovers the work.
+        if self.last_sweep.map_or(true, |t| t.elapsed() >= ORPHAN_SWEEP) {
+            self.last_sweep = Some(Instant::now());
+            Self::sweep_stale_agents(&self.cfg, space);
+        }
         // A person handed work to an agent: one agent per open handoff, until it accepts and finishes.
         // An agent that dies before accepting leaves the handoff open; dropping it here makes the
         // next tick spawn a fresh one.
@@ -416,12 +561,23 @@ impl Orchestrator {
                 }
             }
         }
-        self.handoffs.retain(|_, a| a.alive());
+        // A handoff agent is one job too: when its CLI exits (or its MCP server goes quiet), take it off
+        // the team and remove the folder it left, rather than leaving a "handoff-…" row with no task.
+        let mut finished: Vec<String> = Vec::new();
+        self.handoffs.retain(|_, a| if Self::finished(space, a) { finished.push(a.name.clone()); false } else { true });
+        for name in finished {
+            Self::retire_agent(&self.cfg, space, &name);
+            crate::agents::remove_run_dir(&self.cfg, &name);
+        }
 
         for b in space.briefs() {
             if b.status == "ready" || b.status == "failed" || b.status == "cancelled" {
+                if self.cleaned.insert(b.id.clone()) {
+                    self.finish(space, &b);
+                }
                 continue;
             }
+            self.cleaned.remove(&b.id);
             if let Err(e) = self.step(space, &b, helper.as_deref_mut()) {
                 eprintln!("[host] brief {}: {e:#}", b.id);
             }
@@ -432,6 +588,35 @@ impl Orchestrator {
         let tasks = space.tasks_for(&b.id);
         let review = space.latest_review(&b.id).map(|r| (r.round, r.passed));
         let rt = self.runs.entry(b.id.clone()).or_default();
+
+        // A one-job agent that exited is done: take it off the team at once (revoke also hands back any
+        // task it never reported), so it does not sit in the team list as an idle "worker". Do this
+        // before reading the brief's state, so the counts below only include agents that are still alive.
+        let planner_was = rt.planner.is_some();
+        let planner_alive = rt.planner.as_mut().map(|a| !Self::finished(space, a)).unwrap_or(false);
+        if planner_was && !planner_alive {
+            if let Some(a) = rt.planner.take() {
+                Self::retire_agent(&self.cfg, space, &a.name);
+            }
+        }
+        let workers_was = !rt.workers.is_empty();
+        let mut still_alive: Vec<Agent> = Vec::new();
+        for mut w in rt.workers.drain(..) {
+            if Self::finished(space, &mut w) {
+                Self::retire_agent(&self.cfg, space, &w.name);
+            } else {
+                still_alive.push(w);
+            }
+        }
+        rt.workers = still_alive;
+        let workers_alive = rt.workers.len();
+        let reviewer_was = rt.reviewer.is_some();
+        let reviewer_alive = rt.reviewer.as_mut().map(|a| !Self::finished(space, a)).unwrap_or(false);
+        if reviewer_was && !reviewer_alive {
+            if let Some(a) = rt.reviewer.take() {
+                Self::retire_agent(&self.cfg, space, &a.name);
+            }
+        }
 
         // Seed ops finished? Release Params so agents can add their own.
         if rt.seeding
@@ -471,8 +656,8 @@ impl Orchestrator {
         let state = BriefState {
             status: b.status.clone(),
             seeding: rt.seeding,
-            planner_alive: rt.planner.as_mut().map(|a| a.alive()).unwrap_or(false),
-            workers_alive: rt.workers.iter_mut().map(|w| w.alive()).filter(|alive| *alive).count(),
+            planner_alive,
+            workers_alive,
             open: tasks.iter().filter(|t| t.status == "open").count(),
             active: tasks.iter().filter(|t| t.status == "claimed" || t.status == "awaiting_takeover").count(),
             done: tasks.iter().filter(|t| t.status == "done").count(),
@@ -480,7 +665,7 @@ impl Orchestrator {
             blocked: tasks.iter().filter(|t| t.status == "blocked").count(),
             planned: !space.brief_plan(&b.id).is_empty(),
             exporting: rt.export_op.is_some(),
-            reviewer_alive: rt.reviewer.as_mut().map(|a| a.alive()).unwrap_or(false),
+            reviewer_alive,
             review,
             reviewed_round: rt.reviewed_round,
             review_orphaned: rt.review_round == 0 && rt.reviewer.is_none(),
@@ -506,17 +691,15 @@ impl Orchestrator {
         // A generation that ended without finishing anything never got going (the CLI died at once, the
         // folder is untrusted, a session limit). Count it and hold the next start back instead of
         // spawning an agent every tick; three in a row means no agent can start here at all.
-        if rt.planner.is_some() && !state.planner_alive {
-            rt.planner = None;
+        if planner_was && !planner_alive {
             if state.status == "planning" && state.open + state.active + state.done == 0 {
-                let name = format!("planner-{}", &b.id[2..]);
+                let name = format!("planner-{}", brief_suffix(&b.id));
                 Self::record_failure(rt, &name, "it exited without planning anything");
             }
         }
-        if !rt.workers.is_empty() && state.workers_alive == 0 {
-            rt.workers.clear();
+        if workers_was && workers_alive == 0 {
             if unproductive(state.done, rt.done_at_spawn, state.open, state.active) && !state.exporting {
-                let name = format!("worker{}-{}", rt.spawned, &b.id[2..]);
+                let name = format!("worker{}-{}", rt.spawned, brief_suffix(&b.id));
                 Self::record_failure(rt, &name, "it exited before finishing a task");
             } else {
                 rt.failures = 0;  // that generation built something (or had nothing left to build)
@@ -700,8 +883,23 @@ mod tests {
     fn building_restarts_workers_if_they_all_died_and_reviews_when_done() {
         assert_eq!(next_action(&BriefState { open: 2, ..st("building") }), Action::Build(2));
         assert_eq!(next_action(&BriefState { open: 2, workers_alive: 1, ..st("building") }), Action::Wait);
+        // A task whose helper went quiet is `awaiting_takeover` only until the host's sweep takes that
+        // member off the team and hands the task back; spawning a worker now would find nothing to
+        // claim. (A teammate's helper may hold a real claimed task too.)
+        assert_eq!(next_action(&BriefState { active: 2, ..st("building") }), Action::Wait);
         assert_eq!(next_action(&BriefState { done: 3, ..st("building") }), Action::Review);
         assert_eq!(next_action(&BriefState { done: 3, exporting: true, ..st("building") }), Action::Wait);
+    }
+
+    #[test]
+    fn a_member_that_cannot_reach_the_team_is_not_a_live_agent() {
+        // The MCP server heartbeats, so "stale" means no tool call can get through any more; a start
+        // that has not joined yet has no row, and is left alone until it does.
+        assert!(!unusable_member(""));
+        assert!(!unusable_member("active"));
+        for status in ["stale", "left", "taken_over", "removed"] {
+            assert!(unusable_member(status), "{status}");
+        }
     }
 
     #[test]
@@ -795,8 +993,33 @@ mod tests {
         assert!(!unproductive(0, 0, 0, 0));
     }
 
-    fn task(id: &str, status: &str, objects: &[&str]) -> crate::space::TaskRow {
-        crate::space::TaskRow {
+    #[test]
+    fn a_brief_owns_exactly_the_agents_it_started() {
+        assert!(is_brief_agent("planner-f413f129", "b_f413f129"));
+        assert!(is_brief_agent("worker1-f413f129", "b_f413f129"));
+        assert!(is_brief_agent("worker13-F413F129", "b_f413f129"));
+        assert!(is_brief_agent("reviewer-f413f129", "b_f413f129"));
+        // Another brief, a person's helper, a handoff, or a name that only looks like one.
+        assert!(!is_brief_agent("worker1-4e086346", "b_f413f129"));
+        assert!(!is_brief_agent("lucky-opencode", "b_f413f129"));
+        assert!(!is_brief_agent("handoff-h_1234", "b_f413f129"));
+        assert!(!is_brief_agent("workerX-f413f129", "b_f413f129"));
+        assert!(!is_brief_agent("planner-f413f1290", "b_f413f129"));
+        assert!(!is_brief_agent("planner", "b_f413f129"));
+    }
+
+    #[test]
+    fn a_stale_one_job_agent_is_recognised_and_a_teammate_is_not() {
+        // What a host that stopped mid-brief leaves behind: these rows are swept at startup.
+        for name in ["planner-f413f129", "worker2-f413f129", "reviewer-f413f129", "handoff-h_ab12"] {
+            assert!(is_one_job_agent(name), "{name}");
+        }
+        for name in ["lucky-opencode", "ann-claude", "worker", "worker-two", "host", "carol", "worker1"] {
+            assert!(!is_one_job_agent(name), "{name}");
+        }
+    }
+
+    fn task(id: &str, status: &str, objects: &[&str]) -> crate::space::TaskRow {        crate::space::TaskRow {
             id: id.into(),
             status: status.into(),
             objects: objects.iter().map(|s| s.to_string()).collect(),

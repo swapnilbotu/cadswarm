@@ -20,7 +20,7 @@ pub fn sweep(ctx: &ReducerContext, _row: SweepSchedule) -> Result<(), String> {
             status: m.status.clone(),
             last_seen_ms: m.last_seen_ms,
             stale_since_ms: m.stale_since_ms,
-            online: m.online,
+            online: crate::membership::is_online(ctx, m),
         })
         .collect();
     let plan = rules::plan_sweep(now, &presence);

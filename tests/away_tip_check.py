@@ -37,6 +37,9 @@ def main(out):
     def agent(name):
         return {"name": name, "kind": "agent", "client": "opencode", "status": "stale", "locks": []}
 
+    helper = {"name": "swapnil-codex", "kind": "agent", "client": "codex", "status": "stale", "locks": []}
+    failed = ("its last run failed (exit 2): error: unexpected argument '--full-auto' found")
+
     result = {
         "run": panel.host_agent_run("planner-abc", "db-test"),
         "hosted": panel.away_tip(agent("planner-abc"), None, "db-test"),
@@ -44,6 +47,13 @@ def main(out):
         "last_line": panel.last_log_line(str(key_error)),
         "untrusted": panel.away_tip(agent("worker-trust"), None, "db-test"),
         "finished": panel.away_tip(agent("worker-done"), None, "db-test"),
+        # A helper of this computer: the runner's own state decides the tip, and a dead runner must not
+        # read as "starting" (it never comes back by itself).
+        "local_stopped": panel.away_tip(helper, {"state": "stopped", "off": False}, "db-test"),
+        "local_terminal": panel.away_tip(helper, {"state": "stopped", "off": True}, "db-test"),
+        "local_offline": panel.away_tip(helper, {"state": "offline"}, "db-test"),
+        "local_error": panel.away_tip(helper, {"state": "error", "detail": failed}, "db-test"),
+        "local_starting": panel.away_tip(helper, {"state": "starting"}, "db-test"),
     }
     # Prefs still name the team this computer opened earlier (here: a dead one). The live team's db is
     # what the panel shows, and it must still find the agent the host started for it.

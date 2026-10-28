@@ -22,6 +22,7 @@ Stdlib only: it runs with FreeCAD's Python.
 """
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -33,7 +34,7 @@ import urllib.request
 if __package__ in (None, ""):  # run as a script: make `cadswarm` importable
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cadswarm.agent_setup import default_model, find_agent_cli  # noqa: E402
+from cadswarm.agent_setup import default_model, ensure_codex_approval, find_agent_cli  # noqa: E402
 from cadswarm.client import HubRequestError, load_json, save_json, state_dir  # noqa: E402
 from cadswarm.space_hub import POLL_VIEWS, SpaceHub  # noqa: E402
 
@@ -50,6 +51,13 @@ LOG_LIMIT = 2_000_000
 IDLE_DOING = "listening for instructions"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 GONE = ("not_member", "left", "taken_over", "removed", "bad_token")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+RUNNER_LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d ")
+RUN_FAILED = re.compile(r"\b(error|failed|failure|invalid|denied|forbidden|unauthorized|unexpected argument)\b"
+                        r"|not\s+(been\s+)?trusted|api key", re.IGNORECASE)
+# Codex's own words when it refuses an MCP call it wanted a person to approve. A background run has nobody
+# to ask, so every cadswarm tool fails and the run still exits 0: without this the panel says "Ready".
+MCP_BLOCKED = re.compile(r"requires approval, but approval policy is never", re.IGNORECASE)
 # A warm OpenCode server: start it once, then every message connects to it instead of paying the CLI's
 # startup, config load and MCP boot again (~3-9 s). Measured: a trivial wake went from 3.3 s to 0.9 s, and
 # the team's MCP server starts once for many runs rather than once per run.
@@ -62,6 +70,12 @@ WARM_RETRY_SECONDS = 60     # after a failed start, keep working (slowly) and tr
 
 def status_path(folder):
     return os.path.join(state_dir(folder), "runner.json")
+
+
+def claim_path(folder):
+    """Which runner looks after `folder`. Written once when a runner starts, so the newest one owns the
+    helper and any older copy stops itself (see Runner.other_runner)."""
+    return os.path.join(state_dir(folder), "runner.claim.json")
 
 
 def server_path(folder):
@@ -121,7 +135,9 @@ def start_runner(folder, python, launcher, project=""):
         kwargs["start_new_session"] = True  # keeps running after FreeCAD closes
     pid = subprocess.Popen([python, launcher, "runner", folder, project], **kwargs).pid
     # Claim the folder right away so a second click (or the next panel refresh) doesn't start another.
-    save_json(status_path(folder), {"pid": pid, "beat": time.time(), "state": "starting", "detail": ""})
+    # `started` lets the winner be decided when two did start: the newer process keeps the folder.
+    save_json(status_path(folder), {"pid": pid, "beat": time.time(), "state": "starting", "detail": "",
+                                    "started": time.time()})
     return pid
 
 
@@ -245,6 +261,46 @@ When everything above is handled, stop. Don't call wait_for_changes: you're woke
 """
 
 
+def codex_exec_flags(help_text):
+    """The flags that put `codex exec` in the workspace-write sandbox it used to call --full-auto.
+    Codex removed --full-auto (the CLI now exits 2 with "unexpected argument"), so ask the installed
+    build's own help what it takes: `-s workspace-write` on current ones (the same sandbox), --full-auto
+    on older ones, and the current spelling when the help can't be read at all."""
+    if not help_text or "--sandbox" in help_text:
+        return ["--sandbox", "workspace-write"]
+    if "--full-auto" in help_text:
+        return ["--full-auto"]
+    return []
+
+
+def codex_help(exe):
+    """`codex exec --help` text, or "" when the CLI cannot be asked."""
+    try:
+        out = subprocess.run([exe, "exec", "--help"], capture_output=True, encoding="utf-8",
+                             errors="replace", timeout=15, creationflags=NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "") + (out.stderr or "")
+
+
+_CODEX_FLAGS = {}  # exe -> ((mtime, size), flags): one probe per binary, not one per wake
+
+
+def codex_flags(exe):
+    """Cached `codex_exec_flags` for this binary, so an upgrade is noticed but a wake costs no process."""
+    try:
+        st = os.stat(exe)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    hit = _CODEX_FLAGS.get(exe)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    flags = codex_exec_flags(codex_help(exe))
+    _CODEX_FLAGS[exe] = (stamp, flags)
+    return flags
+
+
 def agent_command(client, exe, folder, prompt, resume, model=None, server=None):
     """(argv, stdin text). The prompt goes in on stdin where the CLI accepts that: a .cmd launcher would
     mangle a multi-line argument. `model` is the folder's pinned model (agent_setup.save_helper_model).
@@ -257,7 +313,7 @@ def agent_command(client, exe, folder, prompt, resume, model=None, server=None):
             "--model", os.environ.get("CADSWARM_HELPER_MODEL") or "sonnet"]
         return argv, prompt
     if client == "codex":
-        return [exe, "exec", "--full-auto", "--skip-git-repo-check", "-"], prompt
+        return [exe, "exec", *codex_flags(exe), "--skip-git-repo-check", "-"], prompt
     if client == "opencode":
         # --standalone: a private server per run, not whatever the person's desktop app is running.
         # The prompt goes in on stdin, like claude and codex: an npm .cmd shim would split a
@@ -283,8 +339,10 @@ class Runner:
         self.hub = SpaceHub(self.cfg, load_json(self.ident_path, {}), timeout=30)
         self.clock = clock
         self.spawn = spawn or self._spawn
+        self.started = self.clock()  # this process's claim on the folder (see other_runner)
         self.child = None
         self.child_started = 0.0
+        self.child_log_at = 0  # where the current run's own output starts in helper.log (see child_said)
         self.state = load_json(os.path.join(state_dir(self.folder), "runner-state.json")) or {}
         self.seen = set(self.state.get("seen") or [])
         self.runs = [t for t in self.state.get("runs") or [] if clock() - t < 3600]
@@ -334,12 +392,24 @@ class Runner:
         if state is not None:
             self.status = (state, detail or "")
         save_json(status_path(self.folder), {"pid": os.getpid(), "beat": self.clock(),
-                                             "state": self.status[0], "detail": self.status[1]})
+                                             "state": self.status[0], "detail": self.status[1],
+                                             "started": self.started})
 
-    def other_runner(self):
-        st = load_json(status_path(self.folder)) or {}
-        return st.get("pid") not in (None, os.getpid()) and runner_alive(self.folder, self.clock()) \
-            and st.get("state") != "starting"
+    def other_runner(self, claim=True):
+        """True when a newer runner owns this folder. Clicking Restart twice used to leave two or three
+        runners on one helper, each polling the team with its own warm server: the later process takes the
+        folder and the older ones stop themselves. `pid` breaks a same-instant tie.
+
+        With `claim` this also (re)takes the folder when it is ours or older: the newest runner always ends
+        up owning the claim file, whatever order two racing starts wrote it in."""
+        st = load_json(claim_path(self.folder)) or {}
+        mine = (self.started, os.getpid())
+        theirs = (float(st.get("started") or 0), int(st.get("pid") or 0))
+        if theirs > mine:
+            return True
+        if claim and (st.get("pid") != os.getpid() or st.get("started") != self.started):
+            save_json(claim_path(self.folder), {"pid": os.getpid(), "started": self.started})
+        return False
 
     # ------------------------------------------------------------------ warm server
 
@@ -531,7 +601,12 @@ class Runner:
         return True, ""
 
     def _spawn(self, argv, stdin_text):
-        log = open(os.path.join(state_dir(self.folder), "helper.log"), "a", encoding="utf-8")
+        path = os.path.join(state_dir(self.folder), "helper.log")
+        try:
+            self.child_log_at = os.path.getsize(path)  # this run's output starts here
+        except OSError:
+            self.child_log_at = 0
+        log = open(path, "a", encoding="utf-8")
         kwargs = {"cwd": self.folder, "env": self.env(), "stdout": log, "stderr": subprocess.STDOUT,
                   "stdin": subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL}
         if os.name == "nt":
@@ -551,6 +626,9 @@ class Runner:
         if not exe:
             self.write_status("missing", f"{client} isn't installed on this computer")
             return False
+        if client == "codex" and ensure_codex_approval(self.folder):
+            self.log("let Codex approve the cadswarm tools in .codex/config.toml: a background run can't "
+                     "answer its approval prompt")
         prompt = wake_prompt(self.cfg.get("name") or "an AI helper", self.project or "your team's project",
                              [line for _, line in work], first)
         model = self.cfg.get("model") or (default_model(client) if client == "opencode" else "")
@@ -591,6 +669,28 @@ class Runner:
             return
         self.present, self.last_beat = True, self.clock()
 
+    def run_output(self):
+        """What this run itself printed so far (the log after `child_log_at`), ANSI codes stripped."""
+        path = os.path.join(state_dir(self.folder), "helper.log")
+        try:
+            with open(path, "rb") as f:
+                f.seek(self.child_log_at)
+                text = f.read(65536).decode("utf-8", "replace")
+        except OSError:
+            return ""
+        return ANSI.sub("", text)
+
+    def child_said(self):
+        """": <first line the run printed>", e.g. "error: unexpected argument '--full-auto' found", or "".
+        A CLI that dies at startup writes its reason first and tips/usage after it, so the first line names
+        the cause; the whole log is one click away in the Tools tab."""
+        lines = [line.strip() for line in self.run_output().splitlines() if line.strip()]
+        # The runner's own bookkeeping lines are timestamped; the CLI's reason is the first other line.
+        lines = [line for line in lines if not RUNNER_LINE.match(line)]
+        # A CLI may print a banner first ("> build · model"), so prefer a line that names a failure.
+        said = next((line for line in lines if RUN_FAILED.search(line)), lines[0] if lines else "")
+        return f": {said[:200]}" if said else ""
+
     def child_running(self):
         if self.child is None:
             return False
@@ -598,8 +698,12 @@ class Runner:
             code = self.child.returncode
             self.log(f"the helper finished (exit {code})")
             self.last_error = "" if code == 0 else (
-                f"its last run stopped with an error (exit {code}). If it isn't signed in yet, open it once in a "
-                "terminal and sign in. Details: the Tools tab ▸ Show my AI helper's log")
+                f"its last run failed (exit {code})" + self.child_said())
+            if MCP_BLOCKED.search(self.run_output()):
+                # Exit 0, but Codex refused every call: say so instead of showing a helper that looks Ready.
+                self.last_error = ("Codex refused every CADSwarm tool call: it asks for approval and a "
+                                   "background run can't answer. Update CADSwarm's Codex setup, then restart "
+                                   "this helper.")
             self.child = None
             self.last_run_end = self.clock()
             self.save_state()
@@ -658,6 +762,12 @@ class Runner:
             self.stop_all()
             self.log("stopped from FreeCAD")
             return False
+        if self.other_runner():
+            # A newer runner claimed the folder (Restart clicked twice, or two starts raced): this one
+            # must not keep polling the team beside it, with its own warm server.
+            self.stop_all()
+            self.log("a newer runner took this folder; stopping")
+            return False
         if self.child_running():
             self.write_status()
             return True
@@ -711,13 +821,15 @@ class Runner:
 
     def run(self):
         if self.other_runner():
+            self.log("a newer runner already looks after this folder; stopping")
             return
         self.write_status("starting")
         self.log(f"runner started for {self.cfg.get('name')} ({self.cfg.get('client')})")
         while self.step():
             time.sleep(POLL_SECONDS)
         self.stop_all()
-        if os.path.exists(status_path(self.folder)):
+        # A runner that stepped aside must not mark the folder stopped: the newer one is working in it.
+        if not self.other_runner(claim=False) and os.path.exists(status_path(self.folder)):
             save_json(status_path(self.folder), {"pid": os.getpid(), "beat": 0, "state": "stopped", "detail": ""})
 
 

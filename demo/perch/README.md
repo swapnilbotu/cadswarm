@@ -93,7 +93,9 @@ the panel registers `client = "freecad"`. `cadswarm setup --client` takes `claud
 `demo/perch/presenter/.cadswarm/` holds the presenter's SpacetimeDB token; `.cadswarm/` is already
 ignored. The driver's `--project` points at that folder, **not** at the repo root.
 
-Keys come from `cadswarm.env` through `scripts\with-env.ps1` (Elastic, Factory, Creao). The driver never
+Keys for the optional Elastic, Factory and Creao services come from the environment; the usual way is a
+`cadswarm.env` next to the checkout, loaded by `scripts\with-env.ps1` (which runs fine without one). The
+agent helpers themselves use their CLIs' own sign-ins. The driver never
 reads a key: its probe asks Elastic through `cadswarm.knowledge` exactly as the host does, and only
 checks that `droid` is on `PATH`.
 
@@ -201,10 +203,10 @@ The build continues after 2:00 and through Q&A. The driver never stops the team.
 |---|---|
 | Probe fails on Claude | check that helper's folder is running; re-run Probe. If it stays down, use the labelled replay: a timeline will not load with a `probe` name removed from `cast`, and dropping the name from both leaves its tasks unowned. Never fake its card |
 | Probe fails on Creao | check the Creao bridge; re-run Probe. The safe run's only task is the lid, owned by `lid-creao`, so taking Creao out of `cast` would leave it unowned: recover with the labelled replay, not a cast edit |
-| Probe fails on Droid | run `droid` once on the host (sign-in), or let the host's reviewer autostart path read `cadswarm.env`; then run `cadswarm-host … init-reviewer` if the Probe still says `no reviewer has joined` (signing in does not create the member). If `init-reviewer` prints `already set up` (the reviewer folder holds an identity), check two things: the folder's `.cadswarm/config.json` `db` matches this run's `host.json` `db` (an identity from another database prints the same thing and joins nothing), and `v_member` holds no retired row (the `left`/`taken_over` row) |
+| Probe fails on Droid | run `droid` once on the host (sign-in), or let the host's reviewer autostart path read the environment; then run `cadswarm-host … init-reviewer` if the Probe still says `no reviewer has joined` (signing in does not create the member). If `init-reviewer` prints `already set up` (the reviewer folder holds an identity), check two things: the folder's `.cadswarm/config.json` `db` matches this run's `host.json` `db` (an identity from another database prints the same thing and joins nothing), and `v_member` holds no retired row (the `left`/`taken_over` row) |
 | The reviewer shows `stale` | expected: `init-reviewer` mints an HTTP-only member that never heartbeats. The sweep never orphans a reviewer, so it stays on the card between rounds. Probe passes it (with `droid` on PATH) and a stale reviewer does not block Start. A stale *helper* does |
 | The Factory card shows a reviewer that is `left` or `taken_over` | the web card reads every `v_member` row and picks the first reviewer, while FreeCAD and Probe read `participants()`, which hides `left`/`taken_over`. With no live reviewer, Probe says `no reviewer has joined` and Start is refused, so this is not cosmetic. Deleting the reviewer folder and re-running `init-reviewer` joins a second row (a `left` namesake is not inherited), and the web card may still show the old one. Check `v_member` **before** a round: an `active` reviewer mid-round is normal. To clear it, start a new database (`-Db`), publish the module into it, reset the presenter and reviewer folders, and re-invite the whole cast; if there is no time for that, delete the reviewer folder and re-run `init-reviewer` so Probe passes, and say the web card may still name the retired row |
-| Probe fails on Elastic | check `ELASTIC_URL`, `KIBANA_URL`, `ELASTIC_API_KEY` in `cadswarm.env`; the recall needs them |
+| Probe fails on Elastic | check `ELASTIC_URL`, `KIBANA_URL`, `ELASTIC_API_KEY` are set in the host's environment (an optional `cadswarm.env` loaded by `scripts\with-env.ps1` is the usual way); the recall needs them |
 | Nothing started by 1:45 (75 s after the press) | the presenter says the fallback line and the page shows it in `Runner.status`; point at the recall and the tasks that did land, replay the booth recording **labelled as a replay**, and say which is live |
 | The phone tunnel died | restart the driver with `--laptop`; same brief, same sequence, the member is the laptop |
 | A step hangs | Next; a `confirm` step is logged `confirmed`, a module step `skipped`, and the sequence moves on |

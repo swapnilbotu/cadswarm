@@ -403,8 +403,257 @@ s.act = real_act
 dlg_style.close()
 style_inbox = {"summary": style_summary, "sections": style_sections, "ready": style_ready, "weak": style_weak,
                "history": style_history, "used": style_used, "posted": style_posts}
+
+# Opening the workbench must not freeze FreeCAD. A busy team takes tens of seconds to answer (the live
+# model alone can be 10 MB), so the rejoin runs on a background thread and the window keeps painting;
+# doing it in Activated() made Windows draw FreeCAD as "not responding" until the team was read.
+class SlowTeam:
+    """A team whose join and first read are slow, like a hosted one under load."""
+    cfg = {"db": "team-db"}
+    hub = "http://127.0.0.1:1"
+
+    def mirror_changes(self, applied):
+        time.sleep(0.4)
+        return {}, [], {}
+
+    def panel_snapshot(self):
+        time.sleep(0.4)
+        return snap
+
+    def post(self, path, body=None):
+        return {}
+
+    def get(self, path, **params):
+        return {"events": [], "seq": 0}
+
+
+class FakeDoc:
+    """Stands in for the live-model document: this check has no real one to draw into."""
+    Objects = []
+    Label = ""
+
+    def recompute(self):
+        return None
+
+    def getObject(self, name):
+        return None
+
+
+class FakePrefs:
+    def __init__(self, **values):
+        self.values = values
+
+    def GetString(self, key):
+        return self.values.get(key, "")
+
+    def SetString(self, key, value):
+        self.values[key] = value
+
+
+def startup_check():
+    real = (panel.prefs, panel.load_identity, panel.save_identity, panel.remember_team, panel.host_dir_for,
+            panel.Session._join, panel.Session._start_workers)
+    started = []
+    panel.prefs = lambda: FakePrefs(Uri="http://127.0.0.1:1", Db="team-db", HostDataDir="", Name="carol",
+                                    ProjectName="Demo")
+    panel.load_identity = lambda db: {"name": "carol", "token": "t" * 32, "seq": 0}
+    panel.save_identity = lambda db, ident: None
+    panel.remember_team = lambda *a: None
+    panel.host_dir_for = lambda db: ""
+    panel.Session._join = lambda self, cfg, identity, name, timeout, host_dir="": (SlowTeam(), dict(identity))
+    panel.Session._start_workers = lambda self: started.append(self.state)
+    try:
+        s = panel.Session()
+        s.mirror = lambda: FakeDoc()  # no real document in this check
+        began = time.time()
+        s.try_auto_rejoin()
+        blocked = time.time() - began
+        during = s.state
+        for _ in range(400):  # what FreeCAD's event loop does while the person waits
+            QtGui.QApplication.processEvents()
+            s.drain()
+            if s.state == "connected":
+                break
+            time.sleep(0.01)
+        found = {"returned_fast": blocked < 0.3, "seconds_blocked": round(blocked, 3),
+                 "state_while_joining": during, "connected": s.state == "connected",
+                 "parts": len(s.model.get("objects", [])), "workers_started": started == ["connected"],
+                 "joining_flag_cleared": s._joining is False}
+        if s.timer:
+            s.timer.stop()  # this check's session is not the panel's
+        return found
+    finally:
+        (panel.prefs, panel.load_identity, panel.save_identity, panel.remember_team, panel.host_dir_for,
+         panel.Session._join, panel.Session._start_workers) = real
+
+
+startup = startup_check()
+
+
+class PaintView:
+    """A few isometric-looking lines, as `panel.iso_outline` would hand them over (no FreeCAD needed)."""
+
+    def segments(self):
+        return [((0.0, 0.0), (10.0, 0.0)), ((10.0, 0.0), (10.0, 6.0)), ((10.0, 6.0), (0.0, 6.0)),
+                ((0.0, 6.0), (0.0, 0.0)), ((0.0, 0.0), (5.0, -4.0))]
+
+
+def projects_check():
+    """The project list people pick from: a picture when we have one, initials when we don't, and a
+    launch that starts this computer's own team server (with Try again) instead of the whole guide."""
+    real = (panel.prefs, panel.load_identity, panel.save_identity, panel.remember_team, panel.host_dir_for,
+            panel.Session._join, panel.Session._start_workers, panel.Session._adopted, panel.hosting.team_ready,
+            panel.hosting.start_team, panel.project_cards.app_dir, panel.JOIN_RETRY_SECONDS)
+    saved = {}
+    started, joins = [], []
+    icons = out / "previews"
+    icons.mkdir(parents=True, exist_ok=True)
+
+    def join_ok(self, cfg, identity, name, timeout, host_dir=""):
+        joins.append(cfg["db"])
+        return SlowTeam(), dict(identity)
+
+    def join_down(self, cfg, identity, name, timeout, host_dir=""):
+        joins.append(cfg["db"])
+        raise panel.HubRequestError(0, {"code": "unreachable", "error": "no server"})
+
+    try:
+        panel.project_cards.app_dir = lambda: str(icons)
+        panel.projects_ui._cache.clear()
+        panel.JOIN_RETRY_SECONDS = 0
+        teams = [{"project": "Rocket", "db": "team-a", "uri": "http://127.0.0.1:3000", "host_data_dir": "C:/p/rocket",
+                  "at": time.time() - 7200},
+                 {"project": "Formula1 Car", "db": "team-b", "uri": "https://cloud", "at": time.time() - 86400}]
+        wrote = panel.projects_ui.save_preview("team-a", PaintView().segments(), 118, time.time() - 3600)
+
+        # The picture comes from the model's own edges: two boxes give 12 lines each, and both count.
+        import Part
+
+        class Box:
+            Shape = Part.makeBox(10, 20, 5)
+
+            class ViewObject:
+                Visibility = True
+
+        class Hidden(Box):
+            class ViewObject:
+                Visibility = False
+
+        class ShapeDoc:
+            Objects = [Box(), Box(), Hidden(), type("Empty", (), {"Shape": Part.Shape()})()]
+
+        box_segments, box_parts = panel.iso_outline(ShapeDoc())
+        corners = [p for seg in box_segments for p in seg]
+        saved["outline"] = {"parts": box_parts, "segments": len(box_segments),
+                            "flat_is_2d": all(len(p) == 2 for seg in box_segments for p in seg),
+                            # (10, 0, 0) in a 30 degree isometric sits at (8.66, 5) on the card
+                            "projected": [[round(p[0], 2), round(p[1], 2)] for p in corners
+                                          if abs(p[0] - 8.66) < 0.01 and abs(p[1] - 5.0) < 0.01][:1]}
+        dlg = panel.projects_ui.ProjectPicker(teams)
+        cards = dlg.cards
+        picture = cards[0].picture.pixmap()
+        blank = cards[1].picture.pixmap()
+        img = picture.toImage()
+        drawn = sum(1 for x in range(0, img.width(), 2) for y in range(0, img.height(), 2)
+                    if img.pixelColor(x, y).name() not in ("#151a21", "#000000"))
+        saved["cards"] = {
+            "count": len(cards),
+            "wrote_picture": wrote is True and panel.project_cards.preview_path("team-a").endswith(".png"),
+            "picture_shown": drawn > 40,  # the drawn outline, not a blank card
+            "picture_fits": picture.width() <= 160 and picture.height() <= 120,
+            "placeholder_for_missing": blank.toImage().pixelColor(4, 4).name() == "#20262e",
+            "subtitle": cards[0].subtitle.text(),
+            "first_selected": dlg.team == teams[0] and dlg.open_button.isEnabled(),
+            "hosted_badge": "Hosted here" in [w.text() for w in cards[0].findChildren(QtGui.QLabel)],
+            "no_badge_for_shared": "Hosted here" not in [w.text() for w in cards[1].findChildren(QtGui.QLabel)],
+        }
+        dlg.select(cards[1])
+        saved["picking"] = {"team": dlg.team["db"], "enabled": dlg.open_button.isEnabled(),
+                            "single_team_no_dialog": panel.projects_ui.pick_team([teams[0]]) is teams[0],
+                            "no_teams": panel.projects_ui.pick_team([]) is None}
+        dlg.deleteLater()
+
+        # Launch with this computer hosting the team and its server stopped: start it, then join.
+        panel.prefs = lambda: FakePrefs(Uri="http://127.0.0.1:1", Db="team-a", HostDataDir="C:/p/rocket",
+                                        HostMode="local", Name="carol", ProjectName="Rocket")
+        panel.load_identity = lambda db: {"name": "carol", "token": "t" * 32, "seq": 0}
+        panel.save_identity = lambda db, ident: None
+        panel.remember_team = lambda *a: None
+        panel.host_dir_for = lambda db: "C:/p/rocket"
+        panel.hosting.team_ready = lambda folder: False
+        panel.hosting.start_team = lambda python, folder, mode, db: started.append((folder, mode, db))
+        panel.Session._join = join_ok
+        panel.Session._start_workers = lambda self: None
+        real_adopted = panel.Session._adopted
+
+        def safe_adopted(self, *a):  # a bug here would abort FreeCAD (offscreen): show it instead
+            try:
+                return real_adopted(self, *a)
+            except Exception:
+                traceback.print_exc()
+
+        panel.Session._adopted = safe_adopted
+        s = panel.Session()
+        s.mirror = lambda: FakeDoc()  # no real document in this check
+        progress = []
+        real_set_state = s.set_state
+        s.set_state = lambda state, detail="": (progress.append((state, detail)), real_set_state(state, detail))
+        s.try_auto_rejoin()
+        for _ in range(400):
+            QtGui.QApplication.processEvents()
+            s.drain()
+            if s.state in ("connected", "disconnected"):
+                break
+            time.sleep(0.01)
+        saved["auto_start"] = {"started": list(started), "connected": s.state == "connected",
+                               "told_the_person": [d for _st, d in progress if d][:3]}
+        if s.timer:
+            s.timer.stop()
+
+        # The same launch with nothing answering: the banner offers Try again, and one click gets in.
+        # (This reuses the panel that is already docked in FreeCAD: a second, never-docked dock widget
+        # upsets FreeCAD's own shutdown under the offscreen platform.)
+        panel.Session._join = join_down
+        bad = panel.Session()
+        bad.mirror = lambda: FakeDoc()  # no real document in this check (offscreen has no 3D view)
+        bad.panel = p
+        p.session = bad
+        bad.try_auto_rejoin()
+        for _ in range(600):
+            QtGui.QApplication.processEvents()
+            bad.drain()
+            if bad.state == "disconnected" and bad.rejoin_error:
+                break
+            time.sleep(0.01)
+        banner = {"state": bad.state, "button": p.banner_button.text(), "headline": p.banner_text.text(),
+                  "error_kept": bool(bad.rejoin_error), "tries": len(joins)}
+        panel.Session._join = join_ok
+        p.banner_action()  # what clicking Try again does
+        for _ in range(400):
+            QtGui.QApplication.processEvents()
+            bad.drain()
+            if bad.state == "connected":
+                break
+            time.sleep(0.01)
+        banner["after_retry"] = bad.state
+        banner["button_after"] = p.banner_button.text()
+        saved["retry"] = banner
+        if bad.timer:
+            bad.timer.stop()
+        p.session = s  # the panel goes back to the team the rest of this check rendered
+        bad.panel = None
+        return saved
+    finally:
+        (panel.prefs, panel.load_identity, panel.save_identity, panel.remember_team, panel.host_dir_for,
+         panel.Session._join, panel.Session._start_workers, panel.Session._adopted, panel.hosting.team_ready,
+         panel.hosting.start_team, panel.project_cards.app_dir, panel.JOIN_RETRY_SECONDS) = real
+
+
+projects = projects_check()
 result = {
     "layout": checks,
+    "startup": startup,
+    "projects": projects,
     "remote": remote,
     "invite_button": invite_button,
     "run_simulation": run_simulation,

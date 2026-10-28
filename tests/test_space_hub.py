@@ -190,6 +190,37 @@ def test_events_since_a_cursor(world):
     assert hub.get("/events", since=5, wait=0) == {"seq": 5, "events": []}
 
 
+def test_polls_read_the_event_head_and_only_read_history_when_it_moved(world):
+    """A view runs over all its rows before WHERE applies, so "anything newer?" on v_event re-read the whole
+    history on every poll, every second, from every helper and panel."""
+    hub, fake = world
+    fake.tables["v_event_head"] = [{"ws": 1, "seq": 5}]
+    reads = []
+    fake.on_sql = lambda q: reads.append(q.split("FROM")[1].split()[0])
+    assert hub.latest_seq() == 5
+    assert hub.get("/events", since=5, wait=0) == {"seq": 5, "events": []}
+    assert "v_event" not in reads, reads
+    fake.tables["v_event"].append({"seq": 6, "kind": "joined", "actor": 3, "at_ms": 2000, "data_json": "{}"})
+    fake.tables["v_event_head"] = [{"ws": 1, "seq": 6}]
+    assert [e["seq"] for e in hub.get("/events", since=5, wait=0)["events"]] == [6]
+
+
+def test_a_module_without_the_event_head_falls_back_to_the_history(world):
+    hub, fake = world
+    real_sql, asked = fake.sql, []
+
+    def sql(query):
+        asked.append(query)
+        if "v_event_head" in query:
+            raise SpaceError(400, "error: no such table: `v_event_head`. If the table exists, it may be marked private.")
+        return real_sql(query)
+
+    fake.sql = sql
+    assert hub.latest_seq() == 5
+    assert hub.latest_seq() == 5
+    assert sum("v_event_head" in q for q in asked) == 1, "an older module is asked once, not on every poll"
+
+
 def test_context_mentions_team_changes_and_unread_and_advances_the_cursor(world):
     hub, fake = world
     text = hub.get("/context")["context"]

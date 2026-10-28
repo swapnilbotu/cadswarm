@@ -93,6 +93,9 @@ def make_runner(tmp_path, client="claude", t=None):
         def poll(self):
             return 0
 
+        def kill(self):
+            pass
+
     r = runner.Runner(str(folder), "Phone stand", clock=lambda: clock[0],
                       spawn=lambda argv, stdin: spawned.append((argv, stdin)) or Child())
     r.hub = hub(t)
@@ -107,6 +110,7 @@ def test_an_idle_poll_is_one_cheap_read_and_news_gets_a_full_look(tmp_path, monk
     calm["v_task"] = []
     calm["v_receipt"] = []
     calm["v_event"] = [{"seq": 5, "kind": "op", "actor": 2, "at_ms": 1, "data_json": "{}"}]
+    calm["v_event_head"] = [{"ws": 1, "seq": 5}]
     r, clock, spawned = make_runner(tmp_path, t=calm)
     r.state["started"] = True  # don't wake it just to say hello
     r.save_state()
@@ -118,12 +122,13 @@ def test_an_idle_poll_is_one_cheap_read_and_news_gets_a_full_look(tmp_path, monk
     queries.clear()
 
     clock[0] += 1
-    r.step()  # nothing happened: only the event cursor is read
-    assert len(queries) == 1 and "v_event" in queries[0], queries
+    r.step()  # nothing happened: only the one-row event head is read, never the history
+    assert queries == ["SELECT * FROM v_event_head"], queries
     assert spawned == []
 
     # A message arrives (which the module records as an event): the full look wakes the helper.
     r.hub.space.tables["v_event"].append({"seq": 6, "kind": "message", "actor": 3, "at_ms": 2, "data_json": "{}"})
+    r.hub.space.tables["v_event_head"] = [{"ws": 1, "seq": 6}]
     r.hub.space.tables["v_message"].append(msg("m_new", 3, "member:1", "steer", "now the base"))
     clock[0] += 1
     r.step()
@@ -221,6 +226,97 @@ def test_each_helper_cli_gets_a_headless_command_with_the_prompt_on_stdin_where_
     assert stdin == "do it\nnow" and not any("do it" in a for a in argv)
 
 
+def test_codex_gets_the_sandbox_flag_its_own_cli_documents():
+    # Codex removed --full-auto: passing it exits 2 with "unexpected argument", so every helper wake died.
+    # `-s workspace-write` is the sandbox --full-auto meant; older builds that predate it still need it.
+    assert runner.codex_exec_flags("Usage: codex exec [OPTIONS] [PROMPT]\n  -s, --sandbox <MODE>") == \
+        ["--sandbox", "workspace-write"]
+    assert runner.codex_exec_flags("Usage: codex exec [OPTIONS]\n  --full-auto") == ["--full-auto"]
+    assert runner.codex_exec_flags("") == ["--sandbox", "workspace-write"]  # can't ask: current spelling
+
+
+def test_the_codex_command_asks_the_cli_once_for_its_flags(monkeypatch):
+    calls = []
+
+    def fake_help(exe):
+        calls.append(exe)
+        return "Usage: codex exec [OPTIONS]\n  -s, --sandbox <MODE>"
+
+    monkeypatch.setattr(runner, "codex_help", fake_help)
+    monkeypatch.setattr(runner, "_CODEX_FLAGS", {})
+    argv, _stdin = runner.agent_command("codex", "codex", "/h", "x", resume=False)
+    assert "--full-auto" not in argv and argv[argv.index("--sandbox") + 1] == "workspace-write"
+    runner.agent_command("codex", "codex", "/h", "x", resume=False)
+    assert calls == ["codex"]  # one probe per binary, not per wake
+
+
+def test_a_failed_run_says_what_the_cli_printed(tmp_path):
+    r, _clock, _spawned = make_runner(tmp_path, client="codex")
+    log = os.path.join(r.folder, ".cadswarm", "helper.log")
+    with open(log, "w", encoding="utf-8") as f:
+        f.write("2026-10-27 10:54:55 waking the helper for 3 new thing(s)\n")
+
+    class Failed:
+        returncode = 2
+
+        def poll(self):
+            return 2
+
+    r.child_log_at = os.path.getsize(log)
+    with open(log, "a", encoding="utf-8") as f:  # a banner, then codex's reason, then tips and usage
+        f.write("> build · gpt-5\n"
+                "\x1b[31merror: unexpected argument '--full-auto' found\x1b[0m\n\ntip: ...\nUsage: codex exec\n")
+    r.child = Failed()
+    assert r.child_running() is False
+    assert "exit 2" in r.last_error
+    assert "unexpected argument '--full-auto' found" in r.last_error
+    assert "> build" not in r.last_error and "\x1b" not in r.last_error
+
+
+def test_a_codex_wake_repairs_an_old_helpers_missing_mcp_approval(tmp_path, monkeypatch):
+    """Helpers set up before this fix have the server but no approval default: every call was refused."""
+    monkeypatch.setattr(runner, "find_agent_cli", lambda c: f"/bin/{c}")
+    r, _clock, spawned = make_runner(tmp_path, client="codex")
+    cfg = os.path.join(r.folder, ".codex", "config.toml")
+    os.makedirs(os.path.dirname(cfg))
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write("[mcp_servers.cadswarm]\ncommand = 'x'\n")
+    assert r.wake([("m:x", "- hi")], first=True)
+    assert spawned
+    with open(cfg, encoding="utf-8") as f:
+        assert "default_tools_approval_mode = 'approve'" in f.read()
+
+
+def test_a_blocked_codex_run_is_reported_even_though_it_exits_zero(tmp_path):
+    """Codex refusing every MCP call leaves exit 0: the panel showed "Ready" while nothing happened."""
+    calm = tables()
+    calm["v_message"], calm["v_task"] = [], []
+    r, _clock, _spawned = make_runner(tmp_path, client="codex", t=calm)
+    log = os.path.join(r.folder, ".cadswarm", "helper.log")
+    with open(log, "w", encoding="utf-8") as f:
+        f.write("2026-10-27 17:13:28 waking the helper for 2 new thing(s)\n")
+
+    class Refused:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    r.child_log_at = os.path.getsize(log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("mcp: cadswarm/list_tasks started\n"
+                "MCP tool call requires approval, but approval policy is never\n"
+                "I could not reach the team.\n")
+    r.child = Refused()
+    assert r.child_running() is False
+    assert "approval" in r.last_error and "exit" not in r.last_error
+    r.state["started"] = True  # don't wake it just to say hello; the next step only reports the failure
+    r.save_state()
+    assert r.step()
+    status = json.load(open(os.path.join(r.folder, ".cadswarm", "runner.json")))
+    assert status["state"] == "error" and "approval" in status["detail"]
+
+
 def test_a_helpers_picked_model_beats_the_environment(monkeypatch):
     monkeypatch.setenv("CADSWARM_HELPER_MODEL", "env/model")
     argv, _ = runner.agent_command("opencode", "opencode", "/h", "x", resume=False, model="anthropic/claude-sonnet-5-5")
@@ -237,6 +333,28 @@ def test_the_runner_wakes_opencode_with_the_folders_model(tmp_path, monkeypatch)
     assert r.wake([("m:x", "- hi")], first=True)
     argv = spawned[-1][0]
     assert argv[argv.index("--model") + 1] == "openai/gpt-5.1"
+
+
+def test_a_newer_runner_takes_the_folder_so_the_old_one_stops(tmp_path, monkeypatch):
+    """Restart clicked twice (or two starts racing) used to leave two or three runners on one helper,
+    each polling the team with its own warm server. The later process takes the folder now."""
+    monkeypatch.setattr(runner, "find_agent_cli", lambda c: f"/bin/{c}")
+    r, clock, spawned = make_runner(tmp_path)
+    assert r.step() is True
+    before = len(spawned)
+    runner.save_json(runner.claim_path(r.folder), {"pid": 999999, "started": clock[0] + 5})
+    assert r.step() is False
+    assert len(spawned) == before  # it stopped instead of waking the helper again
+
+
+def test_an_older_claim_never_takes_the_folder_from_the_runner_that_has_it(tmp_path):
+    """A same-instant tie (or a stale claim from an older process) is broken by pid, the same way every
+    time, so two runners can never both decide they own the folder."""
+    r, clock, _spawned = make_runner(tmp_path)
+    assert r.step() is True
+    runner.save_json(runner.claim_path(r.folder), {"pid": max(1, os.getpid() - 1), "started": clock[0]})
+    assert r.step() is True
+    assert json.load(open(runner.claim_path(r.folder)))["pid"] == os.getpid()
 
 
 def test_runner_alive_follows_its_heartbeat_file(tmp_path):
@@ -322,7 +440,21 @@ def test_a_failed_run_is_reported_until_one_succeeds(tmp_path, monkeypatch):
     clock[0] += 60
     r.step()
     st = json.load(open(os.path.join(r.folder, ".cadswarm", "runner.json")))
-    assert st["state"] == "error" and "sign in" in st["detail"]
+    assert st["state"] == "error" and "exit 1" in st["detail"], st
+
+    class Fine:
+        returncode = 0
+
+        def poll(self):
+            return 0
+    r.seen.clear()  # the fake hub still holds those messages: wake once more, and this run works
+    clock[0] += 60
+    r.spawn = lambda argv, stdin: spawned.append(argv) or Fine()
+    r.step()
+    clock[0] += 60
+    r.step()
+    st = json.load(open(os.path.join(r.folder, ".cadswarm", "runner.json")))
+    assert st["state"] == "listening" and st["detail"] == "", st
 
 
 def test_background_starts_can_be_switched_off_for_a_terminal_session(tmp_path):

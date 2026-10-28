@@ -114,6 +114,12 @@ export const ComponentPreview = __t.object("ComponentPreview", {
 });
 export type ComponentPreview = __Infer<typeof ComponentPreview>;
 
+export const EventHead = __t.object("EventHead", {
+  ws: __t.u64(),
+  seq: __t.u64(),
+});
+export type EventHead = __Infer<typeof EventHead>;
+
 export const Handoff = __t.object("Handoff", {
   id: __t.string(),
   ws: __t.u64(),
@@ -138,6 +144,12 @@ export const Invite = __t.object("Invite", {
   usedBy: __t.u64(),
 });
 export type Invite = __Infer<typeof Invite>;
+
+export const LiveConn = __t.object("LiveConn", {
+  conn: __t.connectionId(),
+  identity: __t.identity(),
+});
+export type LiveConn = __Infer<typeof LiveConn>;
 
 export const Member = __t.object("Member", {
   id: __t.u64(),

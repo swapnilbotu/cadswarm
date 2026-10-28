@@ -468,8 +468,37 @@ def test_ensure_local_reachable_keeps_a_network_database(monkeypatch):
     monkeypatch.setattr(hosting, "port_open", lambda port, host="127.0.0.1", timeout=0.5: True)
     monkeypatch.setattr(hosting, "pid_on_port", lambda port: None)
     monkeypatch.setattr(hosting, "_kill", lambda pid: pytest.fail("must not stop a reachable database"))
-    assert hosting.ensure_local_reachable("local") is False
-    assert hosting.ensure_local_reachable("maincloud") is False
+    assert hosting.ensure_local_reachable("local", "proj") is None
+    assert hosting.ensure_local_reachable("maincloud", "proj") is None
+
+
+def test_db_data_dir_takes_the_last_data_dir():
+    # `spacetime start` passes its default first; the folder the person asked for comes last and wins.
+    cmd = ('spacetimedb-standalone.exe start --data-dir C:\\Users\\a\\AppData\\Local\\SpacetimeDB\\data '
+           '--jwt-key-dir C:\\x --listen-addr 127.0.0.1:3000 --data-dir C:\\scratch\\stdb-data\n')
+    assert hosting._db_data_dir(cmd) == "C:\\scratch\\stdb-data"
+    assert hosting._db_data_dir('spacetime start --data-dir "C:\\My Data\\stdb"') == "C:\\My Data\\stdb"
+    assert hosting._db_data_dir("spacetime start --listen-addr 127.0.0.1:3000") == ""
+
+
+def test_ensure_local_reachable_restarts_on_every_interface_with_the_same_data(tmp_path, monkeypatch):
+    """Reconnecting to a running team rebinds its database itself: nothing else would start a new one,
+    and the new one must open the old one's data folder or the team's database would be gone."""
+    listening, spawns, killed = {"up": True}, [], []
+    monkeypatch.setattr(hosting, "find_tool", lambda name, env: name)
+    monkeypatch.setattr(hosting, "port_open", lambda port, host="127.0.0.1", timeout=0.5: listening["up"])
+    monkeypatch.setattr(hosting, "pid_on_port", lambda port: 4242)
+    monkeypatch.setattr(hosting, "_command_line",
+                        lambda pid: "spacetime start --listen-addr 127.0.0.1:3000 --data-dir D:\\stdb\n")
+    monkeypatch.setattr(hosting, "is_our_process", lambda pid, names=(): pid == 4242)
+    monkeypatch.setattr(hosting, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(hosting, "_kill", lambda pid: (killed.append(pid), listening.update(up=False)))
+    monkeypatch.setattr(hosting, "_wait_port", lambda *a, **k: True)
+    monkeypatch.setattr(hosting, "_spawn",
+                        lambda argv, lay, log_name, env=None: (spawns.append(argv), listening.update(up=True), 9)[2])
+    assert hosting.ensure_local_reachable("local", str(tmp_path / "proj")) == 9
+    assert killed == [4242]
+    assert spawns == [["spacetime", "start", "--listen-addr", "0.0.0.0:3000", "--data-dir", "D:\\stdb"]]
 
 
 def test_start_team_replaces_a_loopback_only_local_database(tmp_path, monkeypatch):
@@ -497,13 +526,21 @@ def test_start_team_replaces_a_loopback_only_local_database(tmp_path, monkeypatc
     monkeypatch.setattr(hosting, "_kill", kill)
     monkeypatch.setattr(hosting, "_wait_port", lambda *a, **k: True)
     monkeypatch.setattr(hosting.subprocess, "run", lambda argv, **kw: ok(argv))
-    monkeypatch.setattr(hosting, "_spawn",
-                        lambda argv, lay, log_name, env=None: (spawns.append(argv) or (7 if argv[0] == "spacetime" else 8)))
+    def spawn(argv, lay, log_name, env=None):
+        spawns.append(argv)
+        if argv[0] == "spacetime":
+            listening["up"] = True
+            return 7
+        return 8
+
+    monkeypatch.setattr(hosting, "_spawn", spawn)
 
     info = hosting.start_team("python.exe", str(data), "local", "cadswarm-x-0001")
     assert killed == [4242]  # the loopback-only server was stopped
+    assert [a[0] for a in spawns].count("spacetime") == 1  # replaced once, not started twice
     assert spawns[0][:4] == ["spacetime", "start", "--listen-addr", "0.0.0.0:3000"]
-    assert info["spacetime_pid"] == 7 and info["host_pid"] == 8
+    # It still serves every team the old one did, so this team doesn't take it over to stop.
+    assert info["spacetime_pid"] is None and info["host_pid"] == 8
 
 
 def test_team_ready_needs_a_ready_status_and_a_live_pid(tmp_path, monkeypatch):

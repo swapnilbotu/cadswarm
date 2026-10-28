@@ -87,6 +87,7 @@ import VBriefRow from "./v_brief_table";
 import VComponentRow from "./v_component_table";
 import VComponentPreviewRow from "./v_component_preview_table";
 import VEventRow from "./v_event_table";
+import VEventHeadRow from "./v_event_head_table";
 import VHandoffRow from "./v_handoff_table";
 import VLockRow from "./v_lock_table";
 import VMeRow from "./v_me_table";
@@ -157,6 +158,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, VEventRow),
+  vEventHead: __table({
+    name: 'v_event_head',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VEventHeadRow),
   vHandoff: __table({
     name: 'v_handoff',
     indexes: [
@@ -337,6 +345,8 @@ type __SchemaWithTableAccessorAliases = Omit<typeof tablesSchema.schemaType, "ta
     readonly "v_component_preview": Omit<typeof tablesSchema.schemaType.tables["vComponentPreview"], "accessorName"> & { readonly accessorName: "v_component_preview" };
     /** @deprecated Use `vEvent` instead. This alias will be removed in the next major version. */
     readonly "v_event": Omit<typeof tablesSchema.schemaType.tables["vEvent"], "accessorName"> & { readonly accessorName: "v_event" };
+    /** @deprecated Use `vEventHead` instead. This alias will be removed in the next major version. */
+    readonly "v_event_head": Omit<typeof tablesSchema.schemaType.tables["vEventHead"], "accessorName"> & { readonly accessorName: "v_event_head" };
     /** @deprecated Use `vHandoff` instead. This alias will be removed in the next major version. */
     readonly "v_handoff": Omit<typeof tablesSchema.schemaType.tables["vHandoff"], "accessorName"> & { readonly accessorName: "v_handoff" };
     /** @deprecated Use `vLock` instead. This alias will be removed in the next major version. */
@@ -394,6 +404,7 @@ const tableAccessorAliases = {
   "v_component": "vComponent",
   "v_component_preview": "vComponentPreview",
   "v_event": "vEvent",
+  "v_event_head": "vEventHead",
   "v_handoff": "vHandoff",
   "v_lock": "vLock",
   "v_me": "vMe",
@@ -444,6 +455,8 @@ export type DbView = __DbViewBase & {
   readonly "v_component_preview": __DbViewBase["vComponentPreview"];
   /** @deprecated Use `vEvent` instead. This alias will be removed in the next major version. */
   readonly "v_event": __DbViewBase["vEvent"];
+  /** @deprecated Use `vEventHead` instead. This alias will be removed in the next major version. */
+  readonly "v_event_head": __DbViewBase["vEventHead"];
   /** @deprecated Use `vHandoff` instead. This alias will be removed in the next major version. */
   readonly "v_handoff": __DbViewBase["vHandoff"];
   /** @deprecated Use `vLock` instead. This alias will be removed in the next major version. */
@@ -494,6 +507,8 @@ export type Tables = __TablesBase & {
   readonly "v_component_preview": __TablesBase["vComponentPreview"];
   /** @deprecated Use `vEvent` instead. This alias will be removed in the next major version. */
   readonly "v_event": __TablesBase["vEvent"];
+  /** @deprecated Use `vEventHead` instead. This alias will be removed in the next major version. */
+  readonly "v_event_head": __TablesBase["vEventHead"];
   /** @deprecated Use `vHandoff` instead. This alias will be removed in the next major version. */
   readonly "v_handoff": __TablesBase["vHandoff"];
   /** @deprecated Use `vLock` instead. This alias will be removed in the next major version. */

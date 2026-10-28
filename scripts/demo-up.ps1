@@ -1,6 +1,6 @@
 # Bring up the whole CadSwarm demo on this machine: build the host and web UI, start the
 # local vite preview server, open a Cloudflare quick tunnel for a public URL, init the
-# data folder against Maincloud, run the host with secrets from with-env.ps1, then print
+# data folder against Maincloud, run the host through with-env.ps1 (an env file is optional), then print
 # a single-use invite (with QR code) for the phone.
 #
 #   powershell -File scripts\demo-up.ps1
@@ -213,7 +213,7 @@ if ($AgentCommand.Count -gt 0) {
     [System.IO.File]::WriteAllText($hostJson, ($cfg | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding $false))
 }
 
-# --- run the host (through with-env.ps1 so secrets reach it) --------------------------
+# --- run the host (through with-env.ps1; an env file is optional) ---------------------
 $hostStatus = Join-Path $state "host-status.json"
 $hostLog = Join-Path $state "host.log"
 $hostErr = Join-Path $state "host.err.log"

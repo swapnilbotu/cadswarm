@@ -107,6 +107,9 @@ Work like a careful teammate:
    suggestions in the notes. Never present it as certification; printed parts still need testing.
 If a teammate goes stale (see model_status), you may take_over their work to finish it."""
 BACKGROUND = os.environ.get("CADSWARM_BACKGROUND") == "1"  # started by the FreeCAD runner, no terminal
+# The team is joined in the background while the client already has our tools. A tool called before the join
+# finished waits this long for it; an unreachable database is retried within the same window.
+JOIN_WAIT_SECONDS = 90
 
 mcp = MCPServer("cadswarm", instructions=INSTRUCTIONS)
 
@@ -124,6 +127,8 @@ class Session:
         self.seq = None   # event cursor for wait_for_changes
         self.lock = threading.Lock()
         self.fea_jobs = set()  # this session's unfinished FEA jobs, polled so their outcome always reaches the team
+        self.ready = threading.Event()  # set once the join finished, joined or not
+        self.join_error = None  # why this process could not join, for every tool call to say
 
     def connect(self):
         ident = self.client.join(None, self.cfg["name"], "agent", self.cfg.get("client"), self.cfg.get("role", "member"))
@@ -195,7 +200,20 @@ class Session:
 S = None
 
 
+def joined():
+    """None once this process is on the team, else the error a tool should return."""
+    if not S.ready.wait(JOIN_WAIT_SECONDS):
+        return {"error": "Still joining the team: its database is slow to answer. Try again in a few seconds.",
+                "code": "joining"}
+    if S.join_error:
+        return {"error": S.join_error, "code": "not_joined"}
+    return None
+
+
 def call(method, path, body=None, doing=None, targets=None, **params):
+    waiting = joined()
+    if waiting:
+        return waiting
     if S.dead:
         return {"error": f"This agent session can no longer act: {S.dead}", "code": "inactive"}
     if doing:
@@ -213,6 +231,8 @@ def call(method, path, body=None, doing=None, targets=None, **params):
 
 def my_name():
     """This helper's name right now: people can rename it, and it follows its task, while this server runs."""
+    if joined():
+        return S.cfg["name"]
     try:
         return S.client.me()["name"]
     except HubRequestError:
@@ -918,20 +938,36 @@ def report_review(brief_id: str, round: int, passed: bool, findings: list[dict])
                                      "findings": findings}, doing="reporting the review")
 
 
-def main():
-    global S
-    S = Session()
-    try:
-        ident = S.connect()
-    except HubRequestError as e:
-        print(f"cadswarm: could not join the team at {S.cfg['uri']} / {S.cfg['db']}: {e}", file=sys.stderr)
-        raise SystemExit(1)
+def join_team():
+    """Join, then greet and start heartbeats. It runs beside the MCP handshake: joining first took 5-14 s on
+    a busy team database, and Claude Code, Codex and OpenCode all start the model without waiting for a slow
+    server, so helpers began with no CADSwarm tools, went looking for them on disk, or gave up at once."""
+    delay, deadline = 1.0, time.time() + JOIN_WAIT_SECONDS
+    while True:
+        try:
+            ident = S.connect()
+            break
+        except HubRequestError as e:
+            if e.code != "unreachable" or time.time() + delay > deadline:
+                S.join_error = f"Couldn't join the team at {S.cfg['uri']} / {S.cfg['db']}: {e}"
+                print(f"cadswarm: {S.join_error}", file=sys.stderr)
+                S.ready.set()
+                return
+            time.sleep(delay)
+            delay = min(delay * 2, 10.0)
     print(f"cadswarm: joined as {ident['name']} ({ident['participant_id']}, fence {ident['fence']})", file=sys.stderr)
+    S.ready.set()
     # Background helpers are greeted by their runner (which posts it sooner); the host's one-job agents and
     # the team server never greet, so the chat stays for the real, lasting helpers.
     if not BACKGROUND and not S.cfg.get("ephemeral"):
         S.greet(ident)
-    threading.Thread(target=S.heartbeat_loop, daemon=True).start()
+    S.heartbeat_loop()
+
+
+def main():
+    global S
+    S = Session()
+    threading.Thread(target=join_team, daemon=True, name="cadswarm-join").start()
     if not S.cfg.get("ephemeral"):
         mcp.run("stdio")
         return
@@ -943,10 +979,11 @@ def main():
         mcp.run("stdio")
     finally:
         S.dead = S.dead or "left"
-        try:
-            S.client.post("/leave")
-        except Exception:
-            pass
+        if S.ready.is_set() and not S.join_error:
+            try:
+                S.client.post("/leave")
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

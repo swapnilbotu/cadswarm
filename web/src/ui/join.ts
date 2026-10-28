@@ -28,7 +28,13 @@ export function mountJoin(app: HTMLElement, opts: JoinOptions): JoinScreen {
   app.innerHTML = `
     <section class="join">
       <header class="join-head">
-        <span class="join-mark" aria-hidden="true"></span>
+        <svg class="join-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4Z"/>
+          <path d="M12 12 20 7.4M12 12 4 7.4M12 12v9.2" opacity=".45"/>
+          <circle cx="12" cy="12" r="2.2" style="fill: var(--own-1)"/>
+          <circle cx="17" cy="9.2" r="1.5" style="fill: var(--own-2)"/>
+          <circle cx="7" cy="9.2" r="1.5" style="fill: var(--own-3)"/>
+        </svg>
         <span class="join-brand">CADSwarm</span>
       </header>
       <div class="join-body">

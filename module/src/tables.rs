@@ -1,4 +1,25 @@
-use spacetimedb::{table, Identity, ScheduleAt};
+use spacetimedb::{table, ConnectionId, Identity, ScheduleAt};
+
+/// One row per open client connection: a WebSocket, or the brief one every HTTP /sql and /call opens.
+/// Presence used to be written to `member` on each connect and disconnect, but every view reads `member`
+/// (caller_ws), so each HTTP request re-ran every subscribed view twice and pinned the database at one
+/// core. No view reads this table, so opening and closing connections costs the subscribers nothing.
+#[table(accessor = live_conn)]
+pub struct LiveConn {
+    #[primary_key]
+    pub conn: ConnectionId,
+    #[index(btree)]
+    pub identity: Identity,
+}
+
+/// The newest event seq of each workspace, so "has anything happened?" reads one row instead of
+/// re-running v_event over the whole history (which a view does before any WHERE applies).
+#[table(accessor = event_head)]
+pub struct EventHead {
+    #[primary_key]
+    pub ws: u64,
+    pub seq: u64,
+}
 
 #[table(accessor = workspace)]
 #[derive(Clone)]

@@ -1,6 +1,7 @@
 """SpaceHub's library and settings routes: browsing runs locally over v_component, writes are ops or
 reducers, and only the reducers (not the client) decide who may change settings."""
 import json
+import threading
 import types
 
 import pytest
@@ -172,7 +173,10 @@ class RecordingHub:
 
 @pytest.fixture
 def session(monkeypatch):
-    s = types.SimpleNamespace(client=RecordingHub(), dead=None, doing="", cfg={"name": "a"})
+    ready = threading.Event()
+    ready.set()
+    s = types.SimpleNamespace(client=RecordingHub(), dead=None, doing="", cfg={"name": "a"}, ready=ready,
+                              join_error=None)
     monkeypatch.setattr(mcp_server, "S", s)
     return s
 

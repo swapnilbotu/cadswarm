@@ -109,3 +109,11 @@ def test_team_settings_drive_mesh_and_clash_tolerances(worker):
     ignored = worker.call("interference", {"names": ["B608", "B608b"],
                                            "_settings": [{"setting": "interference_min_vol", "num": 50}]})
     assert small and not ignored["result"]["clashes"]
+
+
+def test_the_params_sheet_cannot_be_deleted(worker):
+    """A helper deleted Params twice in one demo; every set_param after that failed until a restart."""
+    with pytest.raises(Exception) as e:
+        worker.call("delete", {"name": "Params"}, allowed=["Params"])
+    assert "not_allowed" in str(e.value) or "can't be deleted" in str(e.value)
+    worker.call("set_param", {"alias": "wall_t", "value": "2.4"}, allowed=["Params"])

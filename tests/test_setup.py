@@ -7,7 +7,7 @@ import tomllib
 
 import pytest
 
-from cadswarm.agent_setup import codex_is_trusted, trust_in_codex, write_agent_config
+from cadswarm.agent_setup import codex_is_trusted, ensure_codex_approval, trust_in_codex, write_agent_config
 from cadswarm.invite import InviteError, make_invite, read_invite
 from cadswarm.paths import LAUNCHER
 
@@ -67,11 +67,31 @@ def test_codex_config_parses_and_trust_is_idempotent(tmp_path, monkeypatch):
     cfg = tomllib.loads((proj / ".codex" / "config.toml").read_text(encoding="utf-8"))
     assert cfg["mcp_servers"]["cadswarm"]["args"] == [LAUNCHER, "mcp"]
     assert cfg["mcp_servers"]["cadswarm"]["env"]["CADSWARM_PROJECT"] == str(proj)
+    # A background run can't answer Codex's approval prompt: without this every cadswarm call is refused.
+    assert cfg["mcp_servers"]["cadswarm"]["default_tools_approval_mode"] == "approve"
     assert "hook" in cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert not codex_is_trusted(str(proj))
     assert trust_in_codex(str(proj)) is True and trust_in_codex(str(proj)) is False
     home = tomllib.loads((tmp_path / "codexhome" / "config.toml").read_text(encoding="utf-8"))
     assert home["projects"][str(proj)]["trust_level"] == "trusted"
+
+
+def test_an_old_codex_helper_gets_the_mcp_approval_added(tmp_path):
+    proj = tmp_path / "old-helper"
+    (proj / ".codex").mkdir(parents=True)
+    cfg = proj / ".codex" / "config.toml"
+    cfg.write_text("# my own note\n[mcp_servers.cadswarm]\ncommand = 'x'\nargs = ['mcp']\n\n"
+                   "[mcp_servers.other]\ncommand = 'y'\ndefault_tools_approval_mode = 'prompt'\n")
+    assert ensure_codex_approval(str(proj)) is True
+    assert ensure_codex_approval(str(proj)) is False  # idempotent
+    text = cfg.read_text()
+    parsed = tomllib.loads(text)
+    assert parsed["mcp_servers"]["cadswarm"]["default_tools_approval_mode"] == "approve"
+    assert parsed["mcp_servers"]["cadswarm"]["command"] == "x"
+    assert parsed["mcp_servers"]["other"]["default_tools_approval_mode"] == "prompt"  # untouched
+    assert "# my own note" in text
+    # A folder with no Codex config at all is left alone.
+    assert ensure_codex_approval(str(tmp_path / "no-config")) is False
 
 
 def test_launcher_hook_fails_open_outside_a_project(tmp_path):

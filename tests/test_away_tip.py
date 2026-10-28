@@ -43,3 +43,12 @@ def test_a_host_started_helper_is_not_called_a_teammates(tmp_path):
     assert "teammate's computer" in r["teammate"], r
     assert "teammate's computer" in r["other_team"], r
     assert "teammate's computer" in r["no_db"], r
+    # A helper of this computer whose runner is gone says so and offers the fix, instead of "it answers in a
+    # moment" for ever (that is what a friend saw while Codex rejected every wake with exit 2).
+    assert "isn't running" in r["local_stopped"] and "Restart my AI helpers" in r["local_stopped"], r
+    assert "starting" not in r["local_stopped"], r
+    assert "run in a terminal" in r["local_terminal"], r
+    assert "can't reach the team" in r["local_offline"], r
+    assert "unexpected argument" in r["local_error"] and "--full-auto" in r["local_error"], r
+    assert "Show my AI helpers' logs" in r["local_error"], r
+    assert "starting" in r["local_starting"], r

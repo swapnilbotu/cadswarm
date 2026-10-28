@@ -1,5 +1,6 @@
 """The MCP tools log activity (which moves the agent's pointer) and stop acting once superseded."""
 import json
+import threading
 import types
 
 import pytest
@@ -26,11 +27,73 @@ class RecordingHub:
         return {"path": path, **params}
 
 
+def fake_session(joined=True):
+    ready = threading.Event()
+    if joined:
+        ready.set()
+    return types.SimpleNamespace(client=RecordingHub(), dead=None, doing="", cfg={"name": "a"}, ready=ready,
+                                 join_error=None)
+
+
 @pytest.fixture
 def session(monkeypatch):
-    s = types.SimpleNamespace(client=RecordingHub(), dead=None, doing="", cfg={"name": "a"})
+    s = fake_session()
     monkeypatch.setattr(mcp_server, "S", s)
     return s
+
+
+def test_a_tool_called_during_the_join_waits_for_it(monkeypatch):
+    """The handshake no longer waits for the join, so a model can call a tool while it is still going."""
+    s = fake_session(joined=False)
+    monkeypatch.setattr(mcp_server, "S", s)
+    threading.Timer(0.2, s.ready.set).start()
+    assert mcp_server.lock_objects(["Lid"]) == {"ok": True}
+    assert s.client.posts == [("/locks", {"names": ["Lid"]})]
+
+
+def test_a_join_that_never_finishes_or_failed_says_so(monkeypatch):
+    s = fake_session(joined=False)
+    monkeypatch.setattr(mcp_server, "S", s)
+    monkeypatch.setattr(mcp_server, "JOIN_WAIT_SECONDS", 0.05)
+    assert mcp_server.lock_objects(["Lid"])["code"] == "joining"
+    s.join_error = "Couldn't join the team at u / db: removed: a person removed this helper from the team"
+    s.ready.set()
+    r = mcp_server.lock_objects(["Lid"])
+    assert r["code"] == "not_joined" and "removed" in r["error"]
+    assert s.client.posts == [], "nothing reaches the team before the join"
+
+
+def test_the_join_retries_an_unreachable_database_then_runs_heartbeats(monkeypatch):
+    s = fake_session(joined=False)
+    s.cfg = {"name": "a", "uri": "u", "db": "d", "ephemeral": True}
+    tries = []
+
+    def connect():
+        tries.append(1)
+        if len(tries) < 3:
+            raise HubRequestError(0, {"error": "connection refused", "code": "unreachable"})
+        return {"name": "a", "participant_id": 1, "fence": 2}
+
+    s.connect, s.heartbeat_loop = connect, lambda: None
+    monkeypatch.setattr(mcp_server, "S", s)
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+    mcp_server.join_team()
+    assert len(tries) == 3 and s.ready.is_set() and s.join_error is None
+
+
+def test_a_refused_join_is_not_retried(monkeypatch):
+    s = fake_session(joined=False)
+    s.cfg = {"name": "a", "uri": "u", "db": "d", "ephemeral": True}
+    tries = []
+
+    def connect():
+        tries.append(1)
+        raise HubRequestError(403, {"error": "removed: a person removed this helper", "code": "removed"})
+
+    s.connect = connect
+    monkeypatch.setattr(mcp_server, "S", s)
+    mcp_server.join_team()
+    assert len(tries) == 1 and s.ready.is_set() and "removed" in s.join_error
 
 
 def test_ops_log_activity_with_their_target_objects(session):
