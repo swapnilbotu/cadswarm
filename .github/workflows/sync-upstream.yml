@@ -1,8 +1,7 @@
 name: Sync CADSwarm Upstream
 
+# Manual only: no daily scheduled sync or automatic failure emails.
 on:
-  schedule:
-    - cron: '0 9 * * *'
   workflow_dispatch:
 
 permissions:
